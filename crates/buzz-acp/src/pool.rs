@@ -55,17 +55,12 @@ pub struct TaskMeta {
     /// Control signal for the in-flight prompt task.
     /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
     pub control_tx: Option<tokio::sync::oneshot::Sender<ControlSignal>>,
-    /// Steer request channel for goose-native non-cancelling mid-turn
-    /// delivery. Capacity-1; `try_send` from the main loop fails on
-    /// `Full`/`Closed`, in which case the caller must fall back to the
-    /// universal `ControlSignal::Steer` cancel+merge path. `None` for
-    /// heartbeat tasks and for prompt tasks whose agent does not declare
-    /// `supports_goose_steer`.
+    /// Capacity-1; `Full`/`Closed` from `try_send` means the caller must
+    /// fall back to `ControlSignal::Steer` cancel+merge. `None` outside
+    /// the steer extension path.
     pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
-    /// Snapshot of `OwnedAgent.supports_goose_steer` at dispatch time.
-    /// Read by the main loop's mode-gate fork after the agent has been
-    /// moved into the task, so we must capture the flag eagerly. `false`
-    /// for non-goose agents and for heartbeat tasks.
+    /// Snapshot of `OwnedAgent.supports_goose_steer` taken before the agent
+    /// moves into the prompt task (so the main loop can still read it).
     pub supports_goose_steer: bool,
 }
 
@@ -150,16 +145,10 @@ pub struct OwnedAgent {
     /// Protocol version reported by the agent in its initialize response.
     /// Agents declaring >= 2 support `systemPrompt` in session/new.
     pub protocol_version: u32,
-    /// Whether this agent is goose, gating the non-standard
-    /// `_goose/unstable/session/steer` delivery path for mid-turn mentions.
-    ///
-    /// Inferred from `agentInfo.name == "goose"` (or `serverInfo.name` per the
-    /// ACP-spec MCP heritage) in the `initialize` response. Other agents will
-    /// have this `false`; callers that observe `false` must use the universal
-    /// cancel+merge `Steer` path. Conservative-by-default: when a future agent
-    /// ships a compatible non-interrupting method under a different name, the
-    /// try-and-tolerate fallback in `pool.rs` keeps the gate from becoming a
-    /// hard exclusion list.
+    /// Whether the agent declared support for the non-standard
+    /// `_goose/unstable/session/steer` extension. Inferred from
+    /// `agentInfo.name` in `initialize`. `false` routes mid-turn delivery
+    /// to the universal cancel+merge `Steer` path.
     pub supports_goose_steer: bool,
 }
 
@@ -225,97 +214,44 @@ pub enum ControlSignal {
     Rotate,
 }
 
-/// Goose-native non-cancelling steer request, sent from the main loop to an
-/// in-flight prompt task's read loop via a capacity-1 mpsc channel.
+/// Mid-turn steer request, sent from the main loop to an in-flight prompt
+/// task's read loop via a capacity-1 mpsc channel.
 ///
-/// The read loop owns the `AcpClient`'s reader/writer for the duration of the
-/// turn, so we cannot drive a steer write from the main thread directly. The
-/// main loop carries the steer prompt body (already framed by
-/// `queue::native_steer_framing()` + `queue::format_event_block`); the read
-/// loop completes `sessionId` (lexical) and `expectedRunId`
-/// (`AcpClient::active_run_id` at write time) when it actually emits the
-/// JSON-RPC request. The main loop awaits a `SteerAck` on the `ack_tx`
-/// oneshot.
-///
-/// ## Why the read loop fills params, not the main loop
-///
-/// `expectedRunId` is a *moving target*: the read loop updates
-/// `self.active_run_id` as goose emits `session/update` notifications, and
-/// the steer is rejected if the supplied id doesn't match the *current* run.
-/// A snapshot taken at dispatch (or at mode-gate time) can be stale by the
-/// time the read loop actually writes the steer line. Filling params at
-/// write time uses the freshest possible run id and is correct-by-
-/// construction on the one field whose freshness the protocol checks.
-/// `sessionId` is in lexical scope inside the read loop's caller
-/// (`session_prompt_blocks_with_idle_timeout`), so no plumbing is required
-/// for that — only a function parameter pass-through.
-///
-/// If `active_run_id` is `None` at write time (no `session/update` seen yet
-/// — e.g. agents that never emit run-id metadata), the steer cannot form a
-/// valid `expectedRunId` and the read loop acks
-/// [`SteerError::ExpectedRunIdMissing`]. The main loop maps this to the
-/// "Err-before-pending" bucket: no withhold/mark was established at
-/// `pool::send_steer` time because the request was rejected before any
-/// write, so the watcher only needs to release nothing and fall back to the
-/// universal `ControlSignal::Steer` cancel+merge path.
+/// The main loop carries only the prompt body (pre-rendered by
+/// `queue::native_steer_framing()` + `queue::format_event_block`). The
+/// read loop completes `sessionId` and `expectedRunId` at write time so
+/// `expectedRunId` reflects the *current* run — it advances on every
+/// `session/update`, and a stale snapshot would be rejected by the agent.
 pub struct SteerRequest {
-    /// Prompt body text blocks. Each entry becomes one `text` content
-    /// block in `params.prompt`. Built by the main loop via
-    /// `queue::native_steer_framing()` + `queue::format_event_block` so
-    /// the wording cannot drift from the cancel+merge fallback path.
     pub prompt_blocks: Vec<String>,
-    /// Oneshot for the read loop to report the outcome.
     pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
 }
 
-/// Why a goose-native steer failed.
-///
-/// String fields are intentionally `Debug`-only — read by `tracing` macros
-/// in the main loop's `PoolEvent::SteerAck` arm via `?ack`. The dead-code
-/// lint can't see that path because it doesn't trace through `Debug`
-/// derives, hence the `#[allow]`.
-#[allow(dead_code)]
+#[allow(dead_code)] // String payloads are read via `Debug` in tracing.
 #[derive(Debug)]
 pub enum SteerError {
-    /// The agent returned a JSON-RPC error response.
+    /// JSON-RPC error response from the agent.
     AgentError(String),
-    /// Transport-level failure: write error, read EOF, JSON-RPC framing
-    /// violation, etc. The string carries the underlying `AcpError`'s display.
+    /// Write error, read EOF, framing violation, etc.
     Transport(String),
-    /// At steer-write time `AcpClient::active_run_id` was `None`, so the
-    /// read loop couldn't form a valid `expectedRunId`. The read loop drops
-    /// the request without writing anything; the main loop should release
-    /// any withheld event and fall back to the universal cancel+merge
-    /// `ControlSignal::Steer` path. This is in the same "Err-before-pending"
-    /// bucket as `Transport` write failures: no in-process state was
-    /// established, so no in-process cleanup is needed.
+    /// `active_run_id` was `None` at write time, so the read loop cannot
+    /// form a valid `expectedRunId`; nothing was written.
     ExpectedRunIdMissing,
-    /// The read loop never got to dispatch the steer because the prompt
-    /// completed first. Delivery state for the underlying message is
-    /// unknown after prompt completion — the main loop must treat this as
-    /// "release the withheld event so normal dispatch handles it" with no
-    /// claims that the agent did or did not incorporate it.
+    /// Defensive: `pool::send_steer` returns this synchronously when no
+    /// task is in flight. Not currently routed through the ack channel.
     PromptCompleted,
 }
 
-/// Outcome of a goose-native steer, sent from the read loop back to the
-/// main loop's ack watcher.
+/// Outcome of a steer attempt, sent from the read loop back to the main
+/// loop's ack watcher.
 #[derive(Debug)]
 pub enum SteerAck {
-    /// The agent returned a successful response to the steer request.
-    /// The main loop must drop the withheld event (`remove_event`) — it
-    /// has been delivered via the non-cancelling path.
+    /// Steer response arrived; the agent has the message.
     Success,
-    /// The steer was attempted but failed. Delivery state for the
-    /// underlying message is unknown after prompt completion; the main
-    /// loop must release the withheld event and fall back to the
-    /// universal `Steer` cancel+merge path so the message still reaches
-    /// the agent.
+    /// Steer attempted but failed. See [`SteerError`] for the bucket.
     Err(SteerError),
-    /// The prompt completed before the read loop selected the steer arm.
-    /// Treated as a benign no-op: release the withheld event for normal
-    /// dispatch. Do not fire the fallback `Steer` signal — there is no
-    /// in-flight turn to signal, and normal dispatch handles delivery.
+    /// Prompt completed before the steer response landed. No fallback
+    /// signal — there is no in-flight turn to signal anymore.
     PromptCompletedNeutral,
 }
 
@@ -474,15 +410,7 @@ impl AgentPool {
     }
 
     /// Whether the in-flight task for `channel_id` declared
-    /// `supports_goose_steer` at dispatch time. Used by the main loop's
-    /// mode-gate fork to decide whether to attempt the goose-native
-    /// non-cancelling steer path before falling back to the universal
-    /// cancel+merge `ControlSignal::Steer`.
-    ///
-    /// Returns `false` if no task is in flight for the channel, or the
-    /// task's agent is not goose. Stable to call concurrently with
-    /// `send_steer` because both read from `task_map`; the main loop is
-    /// the only writer.
+    /// `supports_goose_steer` at dispatch time.
     pub fn task_supports_goose_steer(&self, channel_id: Uuid) -> bool {
         self.task_map
             .values()
@@ -491,28 +419,15 @@ impl AgentPool {
             .unwrap_or(false)
     }
 
-    /// Try to send a goose-native steer request to the in-flight task for
-    /// `channel_id`.
+    /// Try to send a steer request to the in-flight task for `channel_id`.
     ///
-    /// Returns `Ok(())` if the request was accepted by the read loop's
-    /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
-    /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
-    /// (already-in-flight write, or read loop torn down). Callers must
-    /// fall back to the universal `ControlSignal::Steer` cancel+merge path
-    /// on `Err`.
+    /// Returns `Ok(())` if accepted by the read loop's capacity-1 receiver,
+    /// `Err(SteerError::Transport)` on `Full`/`Closed`, or
+    /// `Err(SteerError::PromptCompleted)` if no task is in flight. On any
+    /// `Err`, callers fall back to `ControlSignal::Steer` (cancel+merge).
     ///
-    /// This does **not** spawn the ack watcher — the caller owns the
-    /// oneshot `ack_tx` inside `SteerRequest` and is responsible for
-    /// awaiting it and applying the locked Success / Err / PromptCompletedNeutral
-    /// semantics. Caller is also responsible for the synchronous
-    /// `queue.mark_native_steer_pending(...)` *before* spawning the
-    /// watcher, to close the result-vs-ack race.
-    ///
-    /// Returns `Err(SteerError::PromptCompleted)` if no task is in flight
-    /// for `channel_id` (the prompt completed between the mode-gate check
-    /// and this call, or the channel was never in flight). This is
-    /// semantically a soft no-op — the caller should release any withheld
-    /// event and let normal dispatch handle delivery.
+    /// Does not spawn the ack watcher — callers own the oneshot and the
+    /// withhold-via-`queue.mark_native_steer_pending` synchronization.
     pub fn send_steer(
         &mut self,
         channel_id: Uuid,

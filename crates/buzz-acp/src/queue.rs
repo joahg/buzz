@@ -156,16 +156,13 @@ pub struct EventQueue {
     /// Set by `requeue_as_cancelled`, consumed by `flush_next` to set
     /// `FlushBatch::cancel_reason`. Keyed by channel, cleared on flush.
     cancel_reasons: HashMap<Uuid, CancelReason>,
-    /// Events withheld from `queues` while a goose-native steer is in flight
-    /// for that event. Invisible to `flush_next` / `has_flushable_work` /
-    /// `drain` (the events have been moved out of `queues`), so the queue's
-    /// no-double-deliver invariant holds without any change to the hot drain
-    /// path. Populated by [`mark_native_steer_pending`]; drained back to the
-    /// queue front by [`release_native_steer`] (preserving original
-    /// `received_at` fairness, same discipline as `requeue_preserve_timestamps`
-    /// at line 453). Bulk recovery on `IN_FLIGHT_DEADLINE_SECS` expiry is
-    /// performed by `flush_next` / `has_flushable_work` (recover, not
-    /// log-and-drop — the events were never delivered to the agent).
+    /// Side table for events held back while a steer is in flight. Moved
+    /// out of `queues` so `flush_next` / `has_flushable_work` / `drain`
+    /// cannot see them, closing the race between `mark_complete` clearing
+    /// `in_flight_channels` and the ack arriving. Restored to the queue
+    /// front on `Err`/`PromptCompletedNeutral` (preserving `received_at`);
+    /// dropped on `Success`; bulk-recovered on `IN_FLIGHT_DEADLINE_SECS`
+    /// expiry.
     withheld_native_steer: HashMap<Uuid, Vec<QueuedEvent>>,
 }
 
@@ -243,11 +240,7 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
-            // Recover any withheld goose-native steer events for the expired
-            // channel back to the queue front so normal dispatch delivers
-            // them. Unlike the in-flight batch above (already delivered to a
-            // now-hung prompt — nothing to recover), these events were never
-            // delivered to the agent.
+            // Recover withheld events: they were never delivered to the agent.
             self.recover_withheld_for_expired_channel(id);
         }
 
@@ -534,9 +527,7 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
-            // Symmetric with the flush_next expiry block: recover withheld
-            // goose-native steer events for the expired channel so they are
-            // not permanently orphaned in the side table.
+            // Symmetric with the `flush_next` expiry block.
             self.recover_withheld_for_expired_channel(id);
         }
 
@@ -589,30 +580,14 @@ impl EventQueue {
         self.in_flight_channels.contains(&channel_id)
     }
 
-    // ── Goose-native steer withhold (side table) ──────────────────────────
-    //
-    // While a goose-native `_goose/unstable/session/steer` write is in flight
-    // for a specific queued event, that event is moved out of `queues` into
-    // `withheld_native_steer` so `flush_next` / `has_flushable_work` / the
-    // contiguous drain at line 285 cannot see it — closing the race window
-    // between `mark_complete` (which clears `in_flight_channels`) and the
-    // ack arriving on the main loop. On `Success` the event is consumed
-    // (`remove_event`); on `Err` / `PromptCompletedNeutral` it is released
-    // back to the queue front (`release_native_steer`), preserving its
-    // original `received_at` for FIFO fairness.
+    // ── Steer withhold (side table) ───────────────────────────────────────
 
-    /// Move a queued event out of `queues[channel_id]` into the side table
-    /// to withhold it from `flush_next` while a goose-native steer is in
-    /// flight.
+    /// Move a queued event out of `queues[channel_id]` into the side table.
+    /// Returns `false` if the event id was not present (race-safe no-op).
     ///
-    /// Returns `true` if the event was found and withheld, `false` if the
-    /// event id was not present in `queues[channel_id]` (race-safe no-op:
-    /// the event may have already been drained, removed, or never queued).
-    ///
-    /// Must be called synchronously from the mode-gate fork immediately
-    /// after `pool.send_steer` returns `Ok(())` and before any watcher task
-    /// is spawned, so the withhold is established before `mark_complete` /
-    /// any subsequent `flush_next` tick can run.
+    /// Must run synchronously between `pool.send_steer == Ok` and any
+    /// later `flush_next` / `mark_complete` tick — that's what closes the
+    /// double-deliver window.
     pub fn mark_native_steer_pending(&mut self, channel_id: Uuid, event_id: &str) -> bool {
         let Some(q) = self.queues.get_mut(&channel_id) else {
             return false;
@@ -633,16 +608,9 @@ impl EventQueue {
         true
     }
 
-    /// Release a single withheld event back to the front of
-    /// `queues[channel_id]`, preserving its original `received_at`.
-    ///
-    /// Called on `SteerAck::Err(_)` and `SteerAck::PromptCompletedNeutral`
-    /// (delivery unknown after prompt completion; restoring queued event
-    /// for normal dispatch). Idempotent: a no-op if the event was already
-    /// removed or never withheld.
-    ///
-    /// Push-to-front matches the discipline of `requeue_preserve_timestamps`
-    /// at line 453, preserving fairness across channels.
+    /// Release a withheld event back to the front of `queues[channel_id]`.
+    /// Idempotent; push-to-front preserves the original `received_at` so
+    /// FIFO across channels is maintained.
     pub fn release_native_steer(&mut self, channel_id: Uuid, event_id: &str) {
         let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) else {
             return;
@@ -657,9 +625,6 @@ impl EventQueue {
         if entries.is_empty() {
             self.withheld_native_steer.remove(&channel_id);
         }
-        // Push to FRONT so original `received_at` keeps the event at the head
-        // of the channel's queue. Per-channel cap is enforced below in case
-        // a flood of events arrived during the ack window.
         let queue = self.queues.entry(channel_id).or_default();
         queue.push_front(qe);
         while queue.len() > MAX_PENDING_PER_CHANNEL {
@@ -672,12 +637,8 @@ impl EventQueue {
         }
     }
 
-    /// Drop a specific event by id from both the side table and the main
-    /// queue.
-    ///
-    /// Called on `SteerAck::Success` — the agent received the steer, so the
-    /// event has been "delivered" via the non-cancelling path and must not
-    /// be redelivered via normal dispatch. Idempotent across both stores.
+    /// Drop an event by id from both stores. Called on `SteerAck::Success`:
+    /// the agent has it via the non-cancelling path. Idempotent.
     pub fn remove_event(&mut self, channel_id: Uuid, event_id: &str) {
         if let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) {
             entries.retain(|qe| qe.event.id.to_hex() != event_id);
@@ -693,19 +654,11 @@ impl EventQueue {
         }
     }
 
-    /// Bulk-release every withheld event for `channel_id` back to the queue
-    /// front, preserving relative FIFO order.
-    ///
-    /// Called from the `IN_FLIGHT_DEADLINE_SECS` expiry blocks in
-    /// `flush_next` and `has_flushable_work` — if a steer ack never arrives
-    /// (read loop hung, watcher never posted), the withheld events would
-    /// otherwise be permanently orphaned. Recover, do not log-and-drop: the
-    /// events were never delivered to the agent, so normal dispatch must
-    /// have a chance to deliver them.
-    ///
-    /// Iterates the stored entries in reverse so per-entry `push_front`
-    /// composes to original-FIFO order at the queue front (same discipline
-    /// as `requeue_preserve_timestamps` at line 453).
+    /// Bulk-release every withheld event for `channel_id` back to the
+    /// queue front. Called from the `IN_FLIGHT_DEADLINE_SECS` expiry
+    /// blocks (ack never arrived). Reverse iteration + `push_front`
+    /// composes to original-FIFO order at the front; recover-not-drop
+    /// because these events never reached the agent.
     fn recover_withheld_for_expired_channel(&mut self, channel_id: Uuid) {
         let Some(entries) = self.withheld_native_steer.remove(&channel_id) else {
             return;
@@ -1013,11 +966,6 @@ fn format_prompt_actor(pubkey: &str, profile_lookup: Option<&PromptProfileLookup
 ///
 /// Includes: event_id, channel (name + UUID), kind, sender (hex + npub),
 /// time, content, all tags (never stripped), and parsed structural fields.
-///
-/// Reused by the goose-native steer path (lib.rs mode-gate) to render the
-/// single withheld event for delivery via `_goose/unstable/session/steer`,
-/// without paying for the batch-level context blocks the in-flight turn
-/// already has.
 pub(crate) fn format_event_block(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
@@ -1440,17 +1388,9 @@ impl MergeFraming {
     }
 }
 
-/// Framing strings for the goose-native steer path (lib.rs mode-gate),
-/// pulled from the same source-of-truth as the cancel+merge fallback
-/// (`MergeFraming::for_reason(Some(CancelReason::Steer))`).
-///
-/// Returns `(new_header_single, closing_note)`. Native-steer renders only
-/// the new-message header + the single event block + the closing note —
-/// no `prior_header`, no original-request section, because the in-flight
-/// goose turn already has all of that in context. The two paths share
-/// these strings so an agent receiving either transport gets the same
-/// "weave it in, don't abandon your work" orientation (Eva's drift-proof
-/// requirement: native and fallback must not diverge in UX).
+/// `(new_header_single, closing_note)` for the steer path. Shares
+/// strings with `MergeFraming::for_reason(Some(CancelReason::Steer))` so
+/// the steer extension and the cancel+merge fallback render identically.
 pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
     let framing = MergeFraming::for_reason(Some(CancelReason::Steer));
     (framing.new_header_single, framing.closing_note)
@@ -3933,20 +3873,9 @@ mod tests {
         );
     }
 
-    // ── Goose-native steer withhold tests ───────────────────────────────────
-    //
-    // Side-table semantics: `mark_native_steer_pending` moves an event out of
-    // `queues` into `withheld_native_steer`, making it invisible to
-    // `flush_next` / `has_flushable_work` / contiguous drain. `Success` ack
-    // drops it via `remove_event`; `Err` / `PromptCompletedNeutral` ack
-    // restores it to the queue front via `release_native_steer`. The
-    // `IN_FLIGHT_DEADLINE_SECS` expiry bulk-recovers withheld events so they
-    // are never permanently orphaned.
+    // ── Steer withhold tests ────────────────────────────────────────────────
 
-    /// A channel whose only queued event has been withheld for a goose-native
-    /// steer must be invisible to both `flush_next` and `has_flushable_work`.
-    /// The withhold is the whole point of the side table — it must close the
-    /// `mark_complete` → ack race window.
+    /// A channel whose only event is withheld must not appear flushable.
     #[test]
     fn test_native_steer_withhold_only_channel_not_flushable() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -3970,18 +3899,13 @@ mod tests {
         assert_eq!(q.withheld_native_steer.get(&ch).map(|v| v.len()), Some(1));
     }
 
-    /// Earlier events on the same channel must flush normally during the
-    /// steer ack window. Only the specific withheld event is invisible.
-    /// After `release_native_steer`, the released event sits at the queue
-    /// front (push-to-front preserves original `received_at` FIFO) and is
-    /// delivered by the next `flush_next`.
+    /// Earlier events on the same channel still flush during the ack
+    /// window; the released event then sits at the queue front (FIFO).
     #[test]
     fn test_native_steer_earlier_events_flush_during_ack_window() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
 
-        // Three events arrive in order: e1, e2 (already queued), then e3
-        // (the latest mid-turn mention being steered).
         let e1 = make_queued_at(ch, "e1", Duration::from_millis(30));
         let e2 = make_queued_at(ch, "e2", Duration::from_millis(20));
         let e3 = make_queued_at(ch, "e3", Duration::from_millis(10));
@@ -3992,7 +3916,6 @@ mod tests {
         q.push(e2);
         q.push(e3);
 
-        // Steer in flight for e3 — withhold it from normal dispatch.
         assert!(q.mark_native_steer_pending(ch, &e3_id));
 
         // Earlier events flush as a normal batch; e3 is invisible.
@@ -4004,10 +3927,7 @@ mod tests {
         assert_eq!(batch.events[0].event.id.to_hex(), e1_id);
         assert_eq!(batch.events[1].event.id.to_hex(), e2_id);
 
-        // Earlier batch completes; channel is no longer in flight.
         q.mark_complete(ch);
-
-        // Ack arrives as Err or PromptCompletedNeutral → release e3.
         q.release_native_steer(ch, &e3_id);
 
         let next = q.flush_next().expect("released e3 should now flush");
@@ -4019,11 +3939,8 @@ mod tests {
         assert!(q.withheld_native_steer.is_empty());
     }
 
-    /// If the steer ack never arrives — read loop hung, watcher never posted —
-    /// the `IN_FLIGHT_DEADLINE_SECS` auto-expiry block must bulk-recover the
-    /// withheld events back to the queue front so normal dispatch can deliver
-    /// them. Recover, not log-and-drop: the events were never seen by the
-    /// agent.
+    /// If the ack never arrives, the `IN_FLIGHT_DEADLINE_SECS` expiry
+    /// bulk-recovers withheld events back to the queue front.
     #[test]
     fn test_native_steer_expiry_recovers_withheld() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -4033,32 +3950,25 @@ mod tests {
         let event_id = qe.event.id.to_hex();
         q.push(qe);
 
-        // Simulate a prompt in flight for `ch`, then withhold the queued
-        // event for an in-flight goose-native steer.
         q.in_flight_channels.insert(ch);
         q.in_flight_deadlines.insert(ch, Instant::now());
         q.in_flight_batch_sizes.insert(ch, 1);
         assert!(q.mark_native_steer_pending(ch, &event_id));
 
-        // Force the in-flight deadline to be in the past, simulating the
-        // steer ack never arriving and the read loop hanging long enough
-        // for `IN_FLIGHT_DEADLINE_SECS` to elapse. Same expiry-simulation
-        // trick used by `test_retry_throttle_blocks_requeue_channel`.
+        // Force the deadline into the past to trigger the expiry block.
         q.in_flight_deadlines
             .insert(ch, Instant::now() - Duration::from_secs(1));
 
-        // `has_flushable_work` runs the expiry block first; it must recover
-        // the withheld event so the channel registers as flushable.
+        // The expiry block runs first inside `has_flushable_work` and
+        // must recover the withheld event before the flushability check.
         assert!(
             q.has_flushable_work(),
             "expired channel with withheld event must register as flushable after recovery"
         );
 
-        // The withheld event has been moved back to `queues[ch]`.
         assert!(q.withheld_native_steer.is_empty());
         assert_eq!(pending_count(&q), 1);
 
-        // Normal dispatch delivers it.
         let batch = q
             .flush_next()
             .expect("recovered event should flush via normal dispatch");
@@ -4067,10 +3977,8 @@ mod tests {
         assert_eq!(batch.events[0].event.id.to_hex(), event_id);
     }
 
-    /// Bulk-release on expiry must preserve original FIFO. The
-    /// implementation iterates the side-table entries in reverse and
-    /// `push_front`s each — composing to original-FIFO at the queue front.
-    /// Test ≥2 withheld entries (3 here) with staggered `received_at`.
+    /// Bulk-release on expiry preserves original FIFO. Reverse iteration
+    /// + `push_front` per entry composes to original-FIFO at the front.
     #[test]
     fn test_native_steer_bulk_release_preserves_fifo() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -4087,12 +3995,6 @@ mod tests {
         q.push(e2);
         q.push(e3);
 
-        // Withhold all three in FIFO arrival order (e1, e2, e3 → side table).
-        // This simulates a pathological repeated-steer flow; the more
-        // realistic case (one withhold at a time) is covered by the other
-        // tests. What matters here is that the bulk-recovery path
-        // (reverse iter + push_front) composes to original FIFO at the
-        // queue front.
         assert!(q.mark_native_steer_pending(ch, &e1_id));
         assert!(q.mark_native_steer_pending(ch, &e2_id));
         assert!(q.mark_native_steer_pending(ch, &e3_id));
@@ -4106,8 +4008,7 @@ mod tests {
         q.in_flight_batch_sizes.insert(ch, 3);
         assert!(q.has_flushable_work());
 
-        // After recovery, the queue front-to-back order must match the
-        // original FIFO: e1, e2, e3.
+        // Front-to-back order after recovery must be original FIFO.
         let recovered: Vec<String> = q
             .queues
             .get(&ch)
