@@ -168,10 +168,10 @@ export function ChannelScreen({
         : current;
     });
   }, [activeChannelId, openThreadHeadId]);
-  const messagesQuery = useChannelMessagesQuery(activeChannel);
-  useChannelSubscription(activeChannel);
+  const messagesQuery = useChannelMessagesQuery(activeChannel, currentPubkey);
+  useChannelSubscription(activeChannel, currentPubkey);
   const { fetchOlder, hasOlderMessages, isFetchingOlder } =
-    useFetchOlderMessages(activeChannel);
+    useFetchOlderMessages(activeChannel, currentPubkey);
   // Newest TOP-LEVEL message only. The channel read-marker must clear the
   // channel timeline without clearing its threads (NIP-RS Option 1): thread
   // replies are kind-9 channel events, so taking the last message outright
@@ -244,7 +244,10 @@ export function ChannelScreen({
   );
   const toggleReactionMutation = useToggleReactionMutation();
   const deleteMessageMutation = useDeleteMessageMutation(activeChannel);
-  const editMessageMutation = useEditMessageMutation(activeChannel);
+  const editMessageMutation = useEditMessageMutation(
+    activeChannel,
+    currentPubkey,
+  );
   const joinChannelMutation = useJoinChannelMutation(activeChannelId);
   const resolvedMessages = React.useMemo(() => {
     const currentMessages = messagesQuery.data ?? [];

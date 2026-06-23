@@ -160,7 +160,10 @@ export function HomeView({
     );
   }, [channels, selectedChannelIdCandidate]);
 
-  const channelMessagesQuery = useChannelMessagesQuery(selectedChannel);
+  const channelMessagesQuery = useChannelMessagesQuery(
+    selectedChannel,
+    currentPubkey,
+  );
   const toggleReactionMutation = useToggleReactionMutation();
   const channelMessages = channelMessagesQuery.data;
   const threadContext = useInboxThreadContext(
