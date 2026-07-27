@@ -27,6 +27,8 @@ export type StartMeshNodeRequest = {
 export type MeshNodeStatus = {
   state: MeshNodeState;
   mode: MeshNodeMode | null;
+  /** Opaque canonical identity of the relay/community this status belongs to. */
+  communityScope: string;
   health: MeshHealth;
   apiBaseUrl: string | null;
   consoleUrl: string | null;

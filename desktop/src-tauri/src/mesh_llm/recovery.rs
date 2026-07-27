@@ -241,6 +241,16 @@ pub(crate) async fn recover_stale_mesh_runtime(
 pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _rearm_guard = state.mesh_recovery.rearm_lock.lock().await;
+    {
+        let runtime = state.mesh_llm_runtime.lock().await;
+        if runtime.as_ref().is_some_and(|runtime| {
+            !crate::commands::mesh_llm::runtime_matches_active_community(runtime, &state)
+        }) {
+            // `apply_workspace` owns this transition. Never probe or reuse an
+            // outgoing community's ingress for the newly active relay.
+            return Ok(());
+        }
+    }
     let recovery = recover_stale_mesh_runtime(&state, MeshRecoveryUrgency::Watchdog).await;
     let active_pubkeys = active_managed_agent_pubkeys(&state);
     // Mesh participation is resolved through the same definition-authoritative
@@ -322,12 +332,16 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
 }
 
 fn active_managed_agent_pubkeys(state: &AppState) -> HashSet<String> {
+    let active_relay =
+        buzz_core_pkg::relay::normalize_relay_url(&crate::relay::relay_ws_url_with_override(state))
+            .ok();
     state
         .managed_agent_processes
         .lock()
         .map(|guard| {
             guard
                 .keys()
+                .filter(|key| active_relay.as_deref() == Some(key.relay_url.as_str()))
                 .map(|key| key.pubkey.to_ascii_lowercase())
                 .collect()
         })

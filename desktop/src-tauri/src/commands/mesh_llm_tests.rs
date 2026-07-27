@@ -101,13 +101,120 @@ fn buzz_mesh_join_keeps_other_device_with_the_same_member_key() {
 #[test]
 fn buzz_mesh_name_is_stable_and_does_not_expose_the_relay() {
     let first = buzz_mesh_name_for_relay("WSS://EXAMPLE.COM/");
-    let second = buzz_mesh_name_for_relay("wss://example.com:443/some/path?ignored=yes");
+    let second = buzz_mesh_name_for_relay("wss://example.com:443");
+    let path_scoped = buzz_mesh_name_for_relay("wss://example.com/some/path");
     let other_relay = buzz_mesh_name_for_relay("wss://other.example.com");
 
     assert_eq!(first, second);
+    assert_ne!(first, path_scoped);
     assert_ne!(first, other_relay);
     assert!(first.starts_with("buzz-community-"));
     assert!(!first.contains("example"));
+}
+
+#[test]
+fn sharing_configs_round_trip_independently_for_two_relays() {
+    let temp = tempfile::tempdir().expect("temp app data");
+    let relay_a_scope = buzz_mesh_name_for_relay("wss://relay-a.example");
+    let relay_b_scope = buzz_mesh_name_for_relay("wss://relay-b.example");
+    let relay_a_path = mesh_sharing_config_path_for_data_dir(temp.path(), &relay_a_scope);
+    let relay_b_path = mesh_sharing_config_path_for_data_dir(temp.path(), &relay_b_scope);
+    let legacy_path = legacy_mesh_sharing_config_path_for_data_dir(temp.path());
+    let relay_a = MeshSharingConfig {
+        enabled: true,
+        model_id: "model-a".to_string(),
+        max_vram_gb: Some(8),
+    };
+    let relay_b = MeshSharingConfig {
+        enabled: false,
+        model_id: "model-b".to_string(),
+        max_vram_gb: Some(4),
+    };
+
+    save_mesh_sharing_config_to_path(&relay_a_path, &relay_a).expect("save relay A");
+    save_mesh_sharing_config_to_path(&relay_b_path, &relay_b).expect("save relay B");
+
+    assert_eq!(
+        load_mesh_sharing_config_from_paths(&relay_a_path, &legacy_path).expect("load relay A"),
+        Some(relay_a)
+    );
+    assert_eq!(
+        load_mesh_sharing_config_from_paths(&relay_b_path, &legacy_path).expect("load relay B"),
+        Some(relay_b)
+    );
+    assert_ne!(relay_a_path, relay_b_path);
+    assert!(!relay_a_path.to_string_lossy().contains("relay-a.example"));
+    assert!(!relay_b_path.to_string_lossy().contains("relay-b.example"));
+}
+
+#[test]
+fn legacy_sharing_config_is_claimed_by_only_one_relay() {
+    let temp = tempfile::tempdir().expect("temp app data");
+    let legacy_path = legacy_mesh_sharing_config_path_for_data_dir(temp.path());
+    let relay_a_path = mesh_sharing_config_path_for_data_dir(
+        temp.path(),
+        &buzz_mesh_name_for_relay("wss://relay-a.example"),
+    );
+    let relay_b_path = mesh_sharing_config_path_for_data_dir(
+        temp.path(),
+        &buzz_mesh_name_for_relay("wss://relay-b.example"),
+    );
+    let legacy = MeshSharingConfig {
+        enabled: true,
+        model_id: "legacy-model".to_string(),
+        max_vram_gb: None,
+    };
+    save_mesh_sharing_config_to_path(&legacy_path, &legacy).expect("save legacy config");
+
+    assert_eq!(
+        load_mesh_sharing_config_from_paths(&relay_a_path, &legacy_path)
+            .expect("migrate to relay A"),
+        Some(legacy)
+    );
+    assert_eq!(
+        load_mesh_sharing_config_from_paths(&relay_b_path, &legacy_path)
+            .expect("relay B remains unset"),
+        None
+    );
+    assert!(!legacy_path.exists());
+}
+
+#[test]
+fn scoped_config_retires_a_stale_legacy_file_before_another_relay_can_claim_it() {
+    let temp = tempfile::tempdir().expect("temp app data");
+    let legacy_path = legacy_mesh_sharing_config_path_for_data_dir(temp.path());
+    let relay_a_path = mesh_sharing_config_path_for_data_dir(
+        temp.path(),
+        &buzz_mesh_name_for_relay("wss://relay-a.example"),
+    );
+    let relay_b_path = mesh_sharing_config_path_for_data_dir(
+        temp.path(),
+        &buzz_mesh_name_for_relay("wss://relay-b.example"),
+    );
+    let relay_a = MeshSharingConfig {
+        enabled: false,
+        model_id: String::new(),
+        max_vram_gb: None,
+    };
+    let stale_legacy = MeshSharingConfig {
+        enabled: true,
+        model_id: "stale-legacy-model".to_string(),
+        max_vram_gb: None,
+    };
+    save_mesh_sharing_config_to_path(&relay_a_path, &relay_a).expect("save scoped relay A");
+    save_mesh_sharing_config_to_path(&legacy_path, &stale_legacy).expect("save stale legacy");
+
+    assert_eq!(
+        load_mesh_sharing_config_from_paths(&relay_a_path, &legacy_path)
+            .expect("load authoritative scoped relay A"),
+        Some(relay_a)
+    );
+    assert_eq!(
+        load_mesh_sharing_config_from_paths(&relay_b_path, &legacy_path)
+            .expect("relay B cannot claim stale legacy"),
+        None
+    );
+    assert!(!legacy_path.exists());
 }
 
 #[test]
@@ -269,6 +376,7 @@ fn client_status_serializes_with_running_state_and_client_mode() {
     let status = mesh_llm::MeshNodeStatus {
         state: mesh_llm::MeshNodeState::Running,
         mode: Some(mesh_llm::MeshNodeMode::Client),
+        community_scope: "buzz-community-test".to_string(),
         // `MeshHealth::ok()` is module-private; build via the public fields.
         health: mesh_llm::MeshHealth {
             status: mesh_llm::MeshHealthStatus::Ok,
@@ -286,6 +394,10 @@ fn client_status_serializes_with_running_state_and_client_mode() {
     let value = serde_json::to_value(&status).expect("serialize mesh status");
     assert_eq!(value["state"], serde_json::json!("running"));
     assert_eq!(value["mode"], serde_json::json!("client"));
+    assert_eq!(
+        value["communityScope"],
+        serde_json::json!("buzz-community-test")
+    );
 }
 
 #[tokio::test]

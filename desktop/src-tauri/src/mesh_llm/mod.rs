@@ -215,6 +215,10 @@ pub struct StartMeshNodeRequest {
 pub struct MeshNodeStatus {
     pub state: MeshNodeState,
     pub mode: Option<MeshNodeMode>,
+    /// Opaque canonical relay identity for the community this status belongs
+    /// to. The frontend uses it to scope local drafts without persisting the
+    /// relay URL itself.
+    pub community_scope: String,
     pub health: MeshHealth,
     pub api_base_url: Option<String>,
     pub console_url: Option<String>,
@@ -230,10 +234,11 @@ pub struct MeshNodeStatus {
     pub device_name: Option<String>,
 }
 
-pub fn stopped_status() -> MeshNodeStatus {
+pub fn stopped_status(community_scope: impl Into<String>) -> MeshNodeStatus {
     MeshNodeStatus {
         state: MeshNodeState::Off,
         mode: None,
+        community_scope: community_scope.into(),
         health: MeshHealth::ok(),
         api_base_url: None,
         console_url: None,
@@ -467,6 +472,11 @@ impl DesktopMeshRuntime {
         self.mode
     }
 
+    /// Opaque relay scope this runtime was started for.
+    pub fn community_scope(&self) -> &str {
+        self.start_request.mesh_name.as_deref().unwrap_or_default()
+    }
+
     async fn promote_finished_startup(handle: &mut DesktopMeshHandle) {
         let startup_finished = matches!(
             handle,
@@ -666,6 +676,7 @@ impl DesktopMeshRuntime {
         Ok(MeshNodeStatus {
             state,
             mode: Some(self.mode),
+            community_scope: self.community_scope().to_string(),
             health,
             api_base_url: Some(status.api_base_url),
             console_url: Some(status.console_url),
@@ -682,6 +693,7 @@ impl DesktopMeshRuntime {
         MeshNodeStatus {
             state: MeshNodeState::Running,
             mode: Some(MeshNodeMode::Client),
+            community_scope: self.community_scope().to_string(),
             health: MeshHealth::degraded(format!("OpenAI ingress is live; {reason}")),
             api_base_url: Some(self.api_base_url.clone()),
             console_url: Some(self.console_url.clone()),
@@ -698,6 +710,7 @@ impl DesktopMeshRuntime {
         MeshNodeStatus {
             state: MeshNodeState::Starting,
             mode: Some(MeshNodeMode::Client),
+            community_scope: self.community_scope().to_string(),
             health: MeshHealth::degraded("OpenAI ingress and management status are still starting"),
             api_base_url: Some(self.api_base_url.clone()),
             console_url: Some(self.console_url.clone()),

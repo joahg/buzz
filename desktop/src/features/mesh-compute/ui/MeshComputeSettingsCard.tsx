@@ -30,31 +30,13 @@ import {
 } from "../hooks/useMeshDownloadProgress";
 import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
 import { useMeshServingUsage } from "../hooks/useMeshServingUsage";
+import {
+  meshShareDraftStorageKey,
+  readMeshShareDraft,
+  writeMeshShareDraft,
+} from "../shareDraftStorage";
 import { deriveMeshShareToggle } from "../shareToggleState";
 import { deriveServingIndicator } from "../servingUsage";
-
-const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
-const MAX_VRAM_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.max-vram-gb.v1";
-
-function readDraft(key: string): string {
-  try {
-    return window.localStorage.getItem(key) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function writeDraft(key: string, value: string): void {
-  try {
-    if (value === "") {
-      window.localStorage.removeItem(key);
-    } else {
-      window.localStorage.setItem(key, value);
-    }
-  } catch {
-    // Ignore unavailable/full storage; the input still works for this session.
-  }
-}
 
 /**
  * Settings → Compute → Share compute.
@@ -69,12 +51,8 @@ export function MeshComputeSettingsCard() {
     MeshModelOption[]
   >([]);
   const [catalog, setCatalog] = React.useState<MeshModelCatalog | null>(null);
-  const [modelInput, setModelInput] = React.useState(() =>
-    readDraft(MODEL_DRAFT_STORAGE_KEY),
-  );
-  const [maxVramGb, setMaxVramGb] = React.useState<string>(() =>
-    readDraft(MAX_VRAM_DRAFT_STORAGE_KEY),
-  );
+  const [modelInput, setModelInput] = React.useState("");
+  const [maxVramGb, setMaxVramGb] = React.useState("");
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const [actionInFlight, setActionInFlight] = React.useState(false);
   const [pendingAction, setPendingAction] = React.useState<
@@ -83,6 +61,26 @@ export function MeshComputeSettingsCard() {
   const [actionError, setActionError] = React.useState<string | null>(null);
   const { progress: downloadProgress, reset: resetDownloadProgress } =
     useMeshDownloadProgress();
+  const modelDraftKey = meshShareDraftStorageKey(
+    "model",
+    status?.communityScope,
+  );
+  const maxVramDraftKey = meshShareDraftStorageKey(
+    "max-vram-gb",
+    status?.communityScope,
+  );
+  const hydratedDraftScope = React.useRef<string | null>(null);
+
+  // `mesh_node_status` returns the backend's opaque canonical relay scope even
+  // while stopped. Hydrate only that community's drafts after the first status
+  // fetch; the relay URL itself never enters localStorage.
+  React.useEffect(() => {
+    const scope = status?.communityScope?.trim();
+    if (!scope || hydratedDraftScope.current === scope) return;
+    hydratedDraftScope.current = scope;
+    setModelInput(readMeshShareDraft(modelDraftKey, "model"));
+    setMaxVramGb(readMeshShareDraft(maxVramDraftKey, "max-vram-gb"));
+  }, [status?.communityScope, modelDraftKey, maxVramDraftKey]);
 
   // Fetch installed models. Called on mount and whenever the running state
   // changes (a fresh start may have downloaded a new model). Stale-tolerant —
@@ -136,9 +134,9 @@ export function MeshComputeSettingsCard() {
       status.modelId !== modelInput
     ) {
       setModelInput(status.modelId);
-      writeDraft(MODEL_DRAFT_STORAGE_KEY, status.modelId);
+      writeMeshShareDraft(modelDraftKey, status.modelId);
     }
-  }, [status?.state, status?.mode, status?.modelId, modelInput]);
+  }, [status?.state, status?.mode, status?.modelId, modelInput, modelDraftKey]);
 
   // The Share toggle reflects ONLY serve-mode occupancy. A client-mode runtime
   // (this machine consuming a peer's compute) shares the single runtime slot
@@ -288,7 +286,7 @@ export function MeshComputeSettingsCard() {
               onChange={(e) => {
                 const next = e.target.value;
                 setModelInput(next);
-                writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
+                writeMeshShareDraft(modelDraftKey, next);
               }}
               placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
               value={modelInput}
@@ -303,7 +301,7 @@ export function MeshComputeSettingsCard() {
                 disabled={controlsDisabled}
                 onPick={(name) => {
                   setModelInput(name);
-                  writeDraft(MODEL_DRAFT_STORAGE_KEY, name);
+                  writeMeshShareDraft(modelDraftKey, name);
                 }}
                 selected={modelInput.trim()}
               />
@@ -324,7 +322,7 @@ export function MeshComputeSettingsCard() {
                         disabled={controlsDisabled}
                         onClick={() => {
                           setModelInput(m.id);
-                          writeDraft(MODEL_DRAFT_STORAGE_KEY, m.id);
+                          writeMeshShareDraft(modelDraftKey, m.id);
                         }}
                         type="button"
                       >
@@ -365,7 +363,7 @@ export function MeshComputeSettingsCard() {
               onChange={(e) => {
                 const next = e.target.value;
                 setMaxVramGb(next);
-                writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
+                writeMeshShareDraft(maxVramDraftKey, next);
               }}
               placeholder="No limit"
               value={maxVramGb}

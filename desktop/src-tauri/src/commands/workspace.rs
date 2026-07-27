@@ -107,6 +107,30 @@ pub async fn apply_workspace(
     app: AppHandle,
 ) -> Result<(), String> {
     let restore_app = app.clone();
+    #[cfg(feature = "mesh-llm")]
+    let mesh_restore_scope = crate::commands::mesh_llm::buzz_mesh_name_for_relay(&relay_url);
+
+    // Preserve the command's validate-before-mutate contract: a malformed key
+    // must fail before a running mesh is stopped for a relay change. The
+    // blocking apply below parses it again to produce the owned `Keys` value.
+    if let Some(nsec_trimmed) = nsec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Keys::parse(nsec_trimmed).map_err(|e| format!("invalid nsec: {e}"))?;
+    }
+
+    // A mesh runtime is process-global but community-bound. Stop the outgoing
+    // relay's runtime and clear its discovery note while the old relay override
+    // is still installed; only then may the backend point at the next relay.
+    #[cfg(feature = "mesh-llm")]
+    {
+        let state = restore_app.state::<AppState>();
+        crate::commands::mesh_llm::prepare_mesh_for_workspace_change(
+            &restore_app,
+            &state,
+            &relay_url,
+        )
+        .await?;
+    }
+
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
 
@@ -201,14 +225,16 @@ pub async fn apply_workspace(
     #[cfg(feature = "mesh-llm")]
     {
         let app = restore_app.clone();
+        let expected_scope = mesh_restore_scope;
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
-            if restore_pending {
-                if let Err(error) =
-                    crate::commands::mesh_llm::restore_mesh_sharing(&app, &state).await
-                {
-                    eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
-                }
+            // Sharing preferences are relay-scoped, so every community apply
+            // reconciles the single runtime with that relay's saved setting.
+            // Initial launch is only special for managed-agent restoration.
+            if let Err(error) =
+                crate::commands::mesh_llm::restore_mesh_sharing(&app, &state, &expected_scope).await
+            {
+                eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
             }
             crate::mesh_llm::publish_current_status_once(&app, "workspace apply").await;
             if restore_pending {

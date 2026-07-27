@@ -9282,6 +9282,7 @@ export function maybeInstallE2eTauriMocks() {
   ) => ({
     state,
     mode,
+    communityScope: "buzz-community-e2e",
     health: { status: "ok" as const, reason: null },
     apiBaseUrl: state === "running" ? "http://127.0.0.1:9337/v1" : null,
     consoleUrl: null,

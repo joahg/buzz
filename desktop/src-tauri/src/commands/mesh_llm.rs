@@ -1,47 +1,18 @@
-use std::path::PathBuf;
-
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{app_state::AppState, mesh_llm, relay};
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MeshSharingConfig {
-    enabled: bool,
-    model_id: String,
-    max_vram_gb: Option<u64>,
-}
-
-fn mesh_sharing_config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data dir: {error}"))?
-        .join("mesh-sharing.json"))
-}
-
-fn save_mesh_sharing_config(app: &AppHandle, config: &MeshSharingConfig) -> Result<(), String> {
-    let path = mesh_sharing_config_path(app)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create mesh config directory: {error}"))?;
-    }
-    let payload = serde_json::to_vec_pretty(config)
-        .map_err(|error| format!("failed to encode mesh sharing config: {error}"))?;
-    crate::managed_agents::atomic_write_json(&path, &payload)
-}
-
-fn load_mesh_sharing_config(app: &AppHandle) -> Result<Option<MeshSharingConfig>, String> {
-    let path = mesh_sharing_config_path(app)?;
-    match std::fs::read(&path) {
-        Ok(payload) => serde_json::from_slice(&payload)
-            .map(Some)
-            .map_err(|error| format!("failed to parse {}: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("failed to read {}: {error}", path.display())),
-    }
-}
+#[path = "mesh_sharing_config.rs"]
+mod sharing_config;
+#[cfg(test)]
+use sharing_config::{
+    legacy_mesh_sharing_config_path_for_data_dir, load_mesh_sharing_config_from_paths,
+    mesh_sharing_config_path_for_data_dir, save_mesh_sharing_config_to_path,
+};
+use sharing_config::{
+    load_mesh_sharing_config_for_scope, save_mesh_sharing_config_for_scope, MeshSharingConfig,
+};
 
 const RELAY_MESH_RUNTIME_NO_TARGET: &str =
     "Buzz shared compute requires a live serving member; start serving the selected model on a member, then try again";
@@ -94,10 +65,14 @@ fn sharing_config_from_request(
     })
 }
 
-fn restarting_share_status(config: &MeshSharingConfig) -> mesh_llm::MeshNodeStatus {
+fn restarting_share_status(
+    config: &MeshSharingConfig,
+    community_scope: String,
+) -> mesh_llm::MeshNodeStatus {
     mesh_llm::MeshNodeStatus {
         state: mesh_llm::MeshNodeState::Starting,
         mode: Some(mesh_llm::MeshNodeMode::Serve),
+        community_scope,
         health: mesh_llm::MeshHealth {
             status: mesh_llm::MeshHealthStatus::Degraded,
             reason: Some("Buzz is restarting to switch this machine to sharing".to_string()),
@@ -115,26 +90,33 @@ fn restarting_share_status(config: &MeshSharingConfig) -> mesh_llm::MeshNodeStat
 
 fn restart_to_share(
     app: &AppHandle,
+    community_scope: &str,
     config: &MeshSharingConfig,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
-    save_mesh_sharing_config(app, config)?;
-    let status = restarting_share_status(config);
+    save_mesh_sharing_config_for_scope(app, community_scope, config)?;
+    let status = restarting_share_status(config, community_scope.to_string());
     app.request_restart();
     Ok(status)
 }
 
 pub type CmdResult<T> = Result<T, String>;
 
-fn buzz_mesh_name_for_relay(relay_url: &str) -> String {
-    let normalized = url::Url::parse(relay_url.trim())
-        .map(|url| url.origin().ascii_serialization())
+pub(crate) fn buzz_mesh_name_for_relay(relay_url: &str) -> String {
+    let normalized = buzz_core_pkg::relay::normalize_relay_url(relay_url)
         .unwrap_or_else(|_| relay_url.trim().trim_end_matches('/').to_ascii_lowercase());
     let digest = hex::encode(Sha256::digest(normalized.as_bytes()));
     format!("buzz-community-{}", &digest[..32])
 }
 
-fn buzz_mesh_name(state: &AppState) -> String {
+pub(crate) fn buzz_mesh_name(state: &AppState) -> String {
     buzz_mesh_name_for_relay(&relay::relay_ws_url_with_override(state))
+}
+
+pub(crate) fn runtime_matches_active_community(
+    runtime: &mesh_llm::DesktopMeshRuntime,
+    state: &AppState,
+) -> bool {
+    runtime.community_scope() == buzz_mesh_name(state)
 }
 
 fn advance_mesh_status_cursor(
@@ -290,27 +272,51 @@ async fn resolve_buzz_mesh_startup(state: &AppState) -> (Vec<String>, Option<Str
     }
 }
 
-pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> CmdResult<()> {
-    let Some(config) = load_mesh_sharing_config(app)? else {
+pub(crate) async fn restore_mesh_sharing(
+    app: &AppHandle,
+    state: &AppState,
+    expected_scope: &str,
+) -> CmdResult<()> {
+    if buzz_mesh_name(state) != expected_scope {
+        return Ok(());
+    }
+    let Some(config) = load_mesh_sharing_config_for_scope(app, expected_scope)? else {
         return Ok(());
     };
     if !config.enabled || config.model_id.trim().is_empty() {
         return Ok(());
     }
-    if state.mesh_llm_runtime.lock().await.is_some() {
-        return Ok(());
+    {
+        let runtime = state.mesh_llm_runtime.lock().await;
+        if let Some(runtime) = runtime.as_ref() {
+            if runtime.community_scope() == expected_scope {
+                return Ok(());
+            }
+            return Err(
+                "cannot restore shared compute while another community owns the runtime"
+                    .to_string(),
+            );
+        }
     }
     let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(state).await;
     let mut runtime = state.mesh_llm_runtime.lock().await;
-    if runtime.is_some() {
+    if buzz_mesh_name(state) != expected_scope {
         return Ok(());
+    }
+    if let Some(existing) = runtime.as_ref() {
+        if existing.community_scope() == expected_scope {
+            return Ok(());
+        }
+        return Err(
+            "cannot restore shared compute while another community owns the runtime".to_string(),
+        );
     }
     let request = mesh_llm::StartMeshNodeRequest {
         mode: mesh_llm::MeshNodeMode::Serve,
         model_id: Some(config.model_id),
         max_vram_gb: config.max_vram_gb,
         join_token,
-        mesh_name: Some(buzz_mesh_name(state)),
+        mesh_name: Some(expected_scope.to_string()),
         trusted_owner_ids: Some(trusted_owner_ids),
     };
     let started = mesh_llm::DesktopMeshRuntime::start(request)
@@ -319,6 +325,50 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
     *runtime = Some(started);
     drop(runtime);
     mesh_llm::publish_current_status_once(app, "restore").await;
+    Ok(())
+}
+
+/// Tear down a runtime owned by the outgoing relay before `apply_workspace`
+/// installs a different relay override.
+///
+/// The old relay remains active while this runs, so the final stopped
+/// discovery note is published to the community that previously saw the
+/// serving status. A pending client startup has no reliable native shutdown
+/// handle; in that case a process restart is the only boundary that proves the
+/// shared ports are free, matching the existing client-to-serve safety rule.
+pub(crate) async fn prepare_mesh_for_workspace_change(
+    app: &AppHandle,
+    state: &AppState,
+    next_relay_url: &str,
+) -> CmdResult<()> {
+    let next_scope = buzz_mesh_name_for_relay(next_relay_url);
+    let mut guard = state.mesh_llm_runtime.lock().await;
+    let Some(runtime) = guard.as_ref() else {
+        return Ok(());
+    };
+    if runtime.community_scope() == next_scope {
+        return Ok(());
+    }
+    let startup_pending = runtime.is_starting().await;
+    let Some(outgoing) = guard.take() else {
+        return Ok(());
+    };
+    if let Err(error) = outgoing.stop().await {
+        drop(guard);
+        app.request_restart();
+        return Err(format!(
+            "failed to stop shared compute before switching communities: {error:#}; Buzz is restarting to recover the native runtime"
+        ));
+    }
+    mesh_llm::publish_stopped_status_once(app, "workspace change").await;
+    drop(guard);
+    if startup_pending {
+        app.request_restart();
+        return Err(
+            "shared compute was still starting for the previous community; Buzz is restarting before applying the new community"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -333,6 +383,7 @@ pub async fn mesh_start_node(
     } else {
         None
     };
+    let invocation_scope = buzz_mesh_name(&state);
 
     // Never replace a client runtime in-process. Even a Ready SDK handle can
     // finish `stop()` while its native listeners are still releasing :9337
@@ -341,15 +392,28 @@ pub async fn mesh_start_node(
     // process restart, the only boundary that proves both ports are clean.
     {
         let runtime = state.mesh_llm_runtime.lock().await;
+        if buzz_mesh_name(&state) != invocation_scope {
+            return Err(
+                "the active community changed while shared compute was starting; try again"
+                    .to_string(),
+            );
+        }
         if let Some(existing) = runtime.as_ref() {
+            if !runtime_matches_active_community(existing, &state) {
+                return Err(
+                    "shared compute is still owned by another community; switch again or restart Buzz"
+                        .to_string(),
+                );
+            }
             let plan = mesh_start_plan(request.mode, Some(existing.mode()));
             match plan {
                 MeshStartPlan::RestartToReplaceClient => {
                     let config = sharing_config
                         .as_ref()
                         .ok_or_else(|| "serving configuration is unavailable".to_string())?;
+                    let community_scope = existing.community_scope().to_string();
                     drop(runtime);
-                    return restart_to_share(&app, config);
+                    return restart_to_share(&app, &community_scope, config);
                 }
                 MeshStartPlan::RejectOccupied => {
                     return Err("mesh node is already running".to_string());
@@ -368,19 +432,36 @@ pub async fn mesh_start_node(
             request.join_token = join_token;
         }
     }
-    request.mesh_name = Some(buzz_mesh_name(&state));
+    request.mesh_name = Some(invocation_scope.clone());
     let mut runtime = state.mesh_llm_runtime.lock().await;
+    if buzz_mesh_name(&state) != invocation_scope {
+        return Err(
+            "the active community changed while shared compute was starting; try again".to_string(),
+        );
+    }
 
     let plan = match runtime.as_ref() {
-        Some(existing) => mesh_start_plan(request.mode, Some(existing.mode())),
+        Some(existing) if runtime_matches_active_community(existing, &state) => {
+            mesh_start_plan(request.mode, Some(existing.mode()))
+        }
+        Some(_) => {
+            return Err(
+                "shared compute is still owned by another community; switch again or restart Buzz"
+                    .to_string(),
+            );
+        }
         None => mesh_start_plan(request.mode, None),
     };
     if plan == MeshStartPlan::RestartToReplaceClient {
         let config = sharing_config
             .as_ref()
             .ok_or_else(|| "serving configuration is unavailable".to_string())?;
+        let community_scope = runtime
+            .as_ref()
+            .map(|runtime| runtime.community_scope().to_string())
+            .unwrap_or_else(|| invocation_scope.clone());
         drop(runtime);
-        return restart_to_share(&app, config);
+        return restart_to_share(&app, &community_scope, config);
     }
     if plan == MeshStartPlan::RejectOccupied {
         return Err("mesh node is already running".to_string());
@@ -412,7 +493,7 @@ pub async fn mesh_start_node(
     *runtime = Some(started);
     drop(runtime);
     if let Some(config) = sharing_config.as_ref() {
-        save_mesh_sharing_config(&app, config)?;
+        save_mesh_sharing_config_for_scope(&app, &invocation_scope, config)?;
     }
     mesh_llm::publish_current_status_once(&app, "start").await;
     Ok(status)
@@ -567,6 +648,12 @@ pub(crate) async fn ensure_client_node_for_model(
     {
         let runtime = state.mesh_llm_runtime.lock().await;
         if let Some(runtime) = runtime.as_ref() {
+            if !runtime_matches_active_community(runtime, state) {
+                return Err(
+                    "shared compute is still owned by another community; switch again or restart Buzz"
+                        .to_string(),
+                );
+            }
             // A running runtime — in any mode — is the mesh's local OpenAI
             // ingress on `9337`. mesh-llm's router already resolves the
             // requested model to a local, remote, or split target at request
@@ -616,6 +703,12 @@ pub(crate) async fn ensure_client_node_for_model(
     };
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if let Some(existing) = runtime.as_ref() {
+        if !runtime_matches_active_community(existing, state) {
+            return Err(
+                "shared compute is still owned by another community; switch again or restart Buzz"
+                    .to_string(),
+            );
+        }
         // Another GUI agent may have won the startup race while this caller
         // was resolving membership. The runtime is machine-scoped, not
         // agent-scoped: join its selected endpoint into the existing node and
@@ -718,7 +811,19 @@ pub(crate) async fn ensure_relay_mesh_for_record(
     // stay silent (#2062). Probe first; if the ingress is dead, drop the stale
     // runtime and fall through to re-arm it. The mesh coordinator watchdog also
     // calls this path after eviction so recovery is not start-only (Brad #2304).
-    if state.mesh_llm_runtime.lock().await.is_some() {
+    let runtime_scope = {
+        let runtime = state.mesh_llm_runtime.lock().await;
+        runtime
+            .as_ref()
+            .map(|runtime| runtime.community_scope().to_string())
+    };
+    if let Some(runtime_scope) = runtime_scope.as_deref() {
+        if runtime_scope != buzz_mesh_name(&state) {
+            return Err(
+                "shared compute is still owned by another community; switch again or restart Buzz"
+                    .to_string(),
+            );
+        }
         match mesh_llm::recover_stale_mesh_runtime(
             &state,
             mesh_llm::MeshRecoveryUrgency::Foreground,
@@ -792,20 +897,26 @@ pub async fn mesh_stop_node(
     // role under the lock and, when it's a consume session, leave it running
     // and return its live status unchanged. The frontend also guards this, but
     // status can be stale between polls, so the backend is authoritative.
-    let taken = {
-        let mut guard = state.mesh_llm_runtime.lock().await;
-        if let Some(runtime) = guard.as_ref() {
-            if !share_stop_should_teardown(runtime.mode()) {
-                return runtime.status().await.map_err(|error| error.to_string());
-            }
+    let mut guard = state.mesh_llm_runtime.lock().await;
+    let mut community_scope = buzz_mesh_name(&state);
+    if let Some(runtime) = guard.as_ref() {
+        if !runtime_matches_active_community(runtime, &state) {
+            return Err(
+                "shared compute is still owned by another community; switch again or restart Buzz"
+                    .to_string(),
+            );
         }
-        guard.take()
-    };
-    if let Some(runtime) = taken {
+        if !share_stop_should_teardown(runtime.mode()) {
+            return runtime.status().await.map_err(|error| error.to_string());
+        }
+        community_scope = runtime.community_scope().to_string();
+    }
+    if let Some(runtime) = guard.take() {
         runtime.stop().await.map_err(|error| error.to_string())?;
     }
-    save_mesh_sharing_config(
+    save_mesh_sharing_config_for_scope(
         &app,
+        &community_scope,
         &MeshSharingConfig {
             enabled: false,
             model_id: String::new(),
@@ -813,15 +924,18 @@ pub async fn mesh_stop_node(
         },
     )?;
     mesh_llm::publish_stopped_status_once(&app, "stop").await;
-    Ok(mesh_llm::stopped_status())
+    drop(guard);
+    Ok(mesh_llm::stopped_status(community_scope))
 }
 
 #[tauri::command]
 pub async fn mesh_node_status(state: State<'_, AppState>) -> CmdResult<mesh_llm::MeshNodeStatus> {
     let runtime = state.mesh_llm_runtime.lock().await;
     match runtime.as_ref() {
-        Some(runtime) => runtime.status().await.map_err(|error| error.to_string()),
-        None => Ok(mesh_llm::stopped_status()),
+        Some(runtime) if runtime_matches_active_community(runtime, &state) => {
+            runtime.status().await.map_err(|error| error.to_string())
+        }
+        Some(_) | None => Ok(mesh_llm::stopped_status(buzz_mesh_name(&state))),
     }
 }
 
@@ -834,8 +948,10 @@ pub async fn mesh_serving_usage(
 ) -> CmdResult<mesh_llm::MeshServingUsage> {
     let runtime = state.mesh_llm_runtime.lock().await;
     match runtime.as_ref() {
-        Some(runtime) => runtime.serving_usage().await.map_err(|e| e.to_string()),
-        None => Ok(mesh_llm::MeshServingUsage::default()),
+        Some(runtime) if runtime_matches_active_community(runtime, &state) => {
+            runtime.serving_usage().await.map_err(|e| e.to_string())
+        }
+        Some(_) | None => Ok(mesh_llm::MeshServingUsage::default()),
     }
 }
 

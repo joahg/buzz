@@ -137,6 +137,9 @@ async fn reconcile_buzz_mesh_join(app: &AppHandle) -> Result<(), String> {
         let Some(runtime) = runtime.as_ref() else {
             return Ok(());
         };
+        if !crate::commands::mesh_llm::runtime_matches_active_community(runtime, &state) {
+            return Ok(());
+        }
         let payload = runtime
             .status_report_payload()
             .await
@@ -156,6 +159,9 @@ async fn reconcile_buzz_mesh_join(app: &AppHandle) -> Result<(), String> {
     let Some(runtime) = runtime.as_ref() else {
         return Ok(());
     };
+    if !crate::commands::mesh_llm::runtime_matches_active_community(runtime, &state) {
+        return Ok(());
+    }
     let payload = runtime
         .status_report_payload()
         .await
@@ -267,7 +273,15 @@ async fn reconcile_roster(
     let current_request = {
         let runtime = state.mesh_llm_runtime.lock().await;
         match runtime.as_ref() {
-            Some(runtime) => runtime.start_request().clone(),
+            Some(runtime)
+                if crate::commands::mesh_llm::runtime_matches_active_community(runtime, &state) =>
+            {
+                runtime.start_request().clone()
+            }
+            Some(_) => {
+                *pending_shrink = None;
+                return Ok(());
+            }
             None => {
                 *pending_shrink = None;
                 return Ok(());
@@ -342,6 +356,11 @@ async fn reconcile_roster(
         // snapshot.
         return Ok(());
     }
+    if guard.as_ref().is_some_and(|runtime| {
+        !crate::commands::mesh_llm::runtime_matches_active_community(runtime, &state)
+    }) {
+        return Ok(());
+    }
     let Some(running) = guard.take() else {
         return Ok(());
     };
@@ -399,11 +418,15 @@ async fn publish_current_status_for_state(state: &AppState) -> Result<(), String
     let mut payload = {
         let runtime = state.mesh_llm_runtime.lock().await;
         match runtime.as_ref() {
-            Some(runtime) => runtime
-                .status_report_payload()
-                .await
-                .map_err(|error| error.to_string())?,
-            None => stopped_status_payload(&identity),
+            Some(runtime)
+                if crate::commands::mesh_llm::runtime_matches_active_community(runtime, state) =>
+            {
+                runtime
+                    .status_report_payload()
+                    .await
+                    .map_err(|error| error.to_string())?
+            }
+            Some(_) | None => stopped_status_payload(&identity),
         }
     };
     bind_payload_to_member(state, &identity, &mut payload)?;
