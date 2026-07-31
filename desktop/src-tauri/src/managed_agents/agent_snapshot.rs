@@ -510,6 +510,7 @@ mod tests {
                 m
             },
             start_on_app_launch: true,
+            stopped_by_app_shutdown: false,
             auto_restart_on_config_change: true,
             runtime_pid: Some(12345), // MUST NOT appear
             backend: BackendKind::Provider {
