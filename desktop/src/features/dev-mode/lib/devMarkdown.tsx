@@ -1,5 +1,6 @@
 import type * as React from "react";
 
+import { DevCodeBlock } from "@/features/dev-mode/lib/devCodeBlock";
 import {
   renderHighlightedContent,
   type ChannelRefOptions,
@@ -19,6 +20,7 @@ import type { ImetaLookup } from "@/shared/ui/markdown/types";
  */
 
 const FENCE_RE = /^\s{0,3}```/;
+const FENCE_INFO_RE = /^\s{0,3}`{3,}\s*([^\s`]*)/;
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const LIST_ITEM_RE = /^(\s*)(?:([-*+])|(\d{1,3})[.)])\s+(.+)$/;
 const HR_RE = /^ {0,3}([-*_])\s*(?:\1\s*){2,}$/;
@@ -29,6 +31,13 @@ const MEDIA_LINE_RE = /^!\[([^\]]*)\]\((\S+)\)\s*$/;
 /** GFM table rows must start and end with a pipe — looser forms stay prose. */
 const TABLE_ROW_RE = /^\s{0,3}\|.*\|\s*$/;
 const TABLE_DELIM_RE = /^\s{0,3}\|(?:\s*:?-+:?\s*\|)+\s*$/;
+/** `<details>` opener, optionally `open`, optionally with an inline summary. */
+const DETAILS_OPEN_RE =
+  /^\s{0,3}<details(\s+open)?>\s*(?:<summary>(.*?)<\/summary>\s*)?$/i;
+const DETAILS_CLOSE_RE = /^\s{0,3}<\/details>\s*$/i;
+const SUMMARY_LINE_RE = /^\s*<summary>(.*?)<\/summary>\s*$/i;
+/** An indented, non-blank line that continues the preceding list item. */
+const LIST_CONTINUATION_RE = /^[ \t]+\S/;
 
 type CellAlign = "left" | "center" | "right";
 
@@ -130,6 +139,7 @@ export function renderDevMarkdown(
     if (FENCE_RE.test(line)) {
       flushParagraph();
       flushQuote();
+      const language = (FENCE_INFO_RE.exec(line)?.[1] ?? "").toLowerCase();
       const code: string[] = [];
       i += 1;
       while (i < lines.length && !FENCE_RE.test(lines[i])) {
@@ -138,12 +148,65 @@ export function renderDevMarkdown(
       }
       i += 1; // Closing fence (or end of message on an unterminated fence).
       nodes.push(
-        <pre
+        <DevCodeBlock
           key={`c${nodes.length}`}
-          className="my-1 overflow-x-auto rounded-none border border-border/50 bg-muted/40 px-2 py-1"
+          code={code.join("\n")}
+          language={language}
+        />,
+      );
+      continue;
+    }
+
+    const detailsOpen = DETAILS_OPEN_RE.exec(line);
+    if (detailsOpen) {
+      flushParagraph();
+      flushQuote();
+      const startOpen = Boolean(detailsOpen[1]);
+      let summary = detailsOpen[2];
+      const body: string[] = [];
+      let depth = 1;
+      i += 1;
+      while (i < lines.length) {
+        const inner = lines[i];
+        if (DETAILS_OPEN_RE.test(inner)) depth += 1;
+        else if (DETAILS_CLOSE_RE.test(inner)) {
+          depth -= 1;
+          if (depth === 0) {
+            i += 1;
+            break;
+          }
+        }
+        body.push(inner);
+        i += 1;
+      }
+      if (summary === undefined) {
+        let j = 0;
+        while (j < body.length && body[j].trim() === "") j += 1;
+        const hoisted =
+          body[j] === undefined ? null : SUMMARY_LINE_RE.exec(body[j]);
+        if (hoisted) {
+          summary = hoisted[1];
+          body.splice(0, j + 1);
+        }
+      }
+      nodes.push(
+        <details
+          key={`d${nodes.length}`}
+          className="my-1"
+          open={startOpen || undefined}
         >
-          {code.join("\n")}
-        </pre>,
+          <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+            {summary?.trim() ? inline(summary.trim()) : "Details"}
+          </summary>
+          <div className="mt-1 border-l border-border/40 pl-2">
+            {renderDevMarkdown(
+              body.join("\n"),
+              mentions,
+              channelRefs,
+              imetaByUrl,
+            )}
+          </div>
+        </details>,
       );
       continue;
     }
@@ -272,6 +335,24 @@ export function renderDevMarkdown(
     if (item) {
       flushParagraph();
       const [, indent, bullet, number, rest] = item;
+      const body = [rest];
+      i += 1;
+      // Indented follow-up lines continue the item (GFM lazy continuation)
+      // unless they start a block of their own — a nested item, fence,
+      // quote, rule, or table row.
+      while (
+        i < lines.length &&
+        LIST_CONTINUATION_RE.test(lines[i]) &&
+        !LIST_ITEM_RE.test(lines[i]) &&
+        !FENCE_RE.test(lines[i]) &&
+        !QUOTE_RE.test(lines[i]) &&
+        !HR_RE.test(lines[i]) &&
+        !TABLE_ROW_RE.test(lines[i]) &&
+        !DETAILS_OPEN_RE.test(lines[i])
+      ) {
+        body.push(lines[i].trim());
+        i += 1;
+      }
       nodes.push(
         <div
           key={`li${nodes.length}`}
@@ -282,11 +363,10 @@ export function renderDevMarkdown(
             {bullet ? "•" : `${number}.`}
           </span>
           <span className="min-w-0 flex-1 whitespace-pre-wrap">
-            {inline(rest)}
+            {inline(body.join("\n"))}
           </span>
         </div>,
       );
-      i += 1;
       continue;
     }
 

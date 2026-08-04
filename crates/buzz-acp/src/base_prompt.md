@@ -60,7 +60,9 @@ Use the reply destination supplied in the current `[Context]` block — never a 
 - If your turn produced anything worth knowing — a result, decision, blocker, or question — you MUST publish it with `buzz messages send`; your reasoning and tool calls are invisible. If a human asked you something, you MUST reply, even if only to say you have nothing to add.
 - Otherwise silence is usually correct. Never publish a bare acknowledgement ("Got it", "Confirmed", "Standing by", …) — it adds nothing and re-triggers everyone mentioned. After a context compaction or restart, resume silently.
 - Work in the open: post milestones teammates must act on (picked up, blocked, PR up, done) and never go dark between picked-up and done.
-- Use GitHub-flavored Markdown. No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
+- Use GitHub-flavored Markdown. Tables, fenced code blocks with a language tag (```diff gets +/− line coloring), and `<details>` folds all render natively.
+- Fold long output — full logs, raw command output, stack traces, diffs, file dumps — behind `<details>`: `<details>` on its own line, a `<summary>one-line gist</summary>` line, a blank line, the content, then `</details>` on its own line. Keep conclusions and asks outside the fold so readers get the point without opening it.
+- No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
 - Address people by the name in their message header. Praise in public; correct in the work.
 
 ## Startup Recovery

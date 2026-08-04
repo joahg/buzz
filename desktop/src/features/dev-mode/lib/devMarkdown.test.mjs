@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { DevCodeBlock, diffLineClass } from "./devCodeBlock.tsx";
 import { renderDevMarkdown } from "./devMarkdown.tsx";
 
 function elements(nodes, type) {
@@ -29,18 +30,35 @@ test("blankLine_splitsParagraphs", () => {
   assert.equal(elements(nodes, "p").length, 2);
 });
 
-test("fencedCode_rendersPreWithoutFenceLines", () => {
+test("fencedCode_rendersCodeBlockWithoutFenceLines", () => {
   const nodes = renderDevMarkdown("before\n```ts\nconst a = 1;\n```\nafter");
-  const [pre] = elements(nodes, "pre");
-  assert.ok(pre);
-  assert.equal(textOf(pre), "const a = 1;");
+  const [block] = elements(nodes, DevCodeBlock);
+  assert.ok(block);
+  assert.equal(block.props.code, "const a = 1;");
+  assert.equal(block.props.language, "ts");
   assert.equal(elements(nodes, "p").length, 2);
 });
 
 test("unterminatedFence_capturesRestOfMessage", () => {
   const nodes = renderDevMarkdown("```\nline1\nline2");
-  const [pre] = elements(nodes, "pre");
-  assert.equal(textOf(pre), "line1\nline2");
+  const [block] = elements(nodes, DevCodeBlock);
+  assert.equal(block.props.code, "line1\nline2");
+  assert.equal(block.props.language, "");
+});
+
+test("fenceInfoString_takesFirstWordLowercased", () => {
+  const nodes = renderDevMarkdown("```Diff render=fancy\n+a\n```");
+  const [block] = elements(nodes, DevCodeBlock);
+  assert.equal(block.props.language, "diff");
+});
+
+test("diffLineClass_colorsAddsRemovesAndHunks", () => {
+  assert.equal(diffLineClass("+added"), "code-line-diff-add");
+  assert.equal(diffLineClass("-removed"), "code-line-diff-remove");
+  assert.equal(diffLineClass("@@ -1,2 +1,2 @@"), "text-muted-foreground");
+  assert.equal(diffLineClass(" context"), undefined);
+  assert.equal(diffLineClass("+++ b/file.ts"), undefined);
+  assert.equal(diffLineClass("--- a/file.ts"), undefined);
 });
 
 test("heading_rendersBoldWithoutHashes", () => {
@@ -167,4 +185,94 @@ test("tableEndsAtFirstNonRowLine", () => {
   assert.ok(findTable(nodes));
   assert.equal(elements(nodes, "p").length, 1);
   assert.equal(textOf(elements(nodes, "p")[0]), "after");
+});
+
+test("detailsBlock_rendersSummaryAndFoldedBody", () => {
+  const nodes = renderDevMarkdown(
+    "<details>\n<summary>Full log</summary>\n\nline one\n\nline two\n</details>",
+  );
+  const [details] = elements(nodes, "details");
+  assert.ok(details);
+  assert.equal(details.props.open, undefined);
+  const [summary, body] = details.props.children;
+  assert.equal(summary.type, "summary");
+  assert.equal(textOf(summary), "Full log");
+  assert.equal(textOf(body), "line one" + "line two");
+});
+
+test("detailsOpenAttribute_startsExpanded", () => {
+  const nodes = renderDevMarkdown("<details open>\nbody\n</details>");
+  const [details] = elements(nodes, "details");
+  assert.equal(details.props.open, true);
+});
+
+test("detailsInlineSummaryOnOpenLine_isHoisted", () => {
+  const nodes = renderDevMarkdown(
+    "<details><summary>Gist</summary>\nbody\n</details>",
+  );
+  const [details] = elements(nodes, "details");
+  const [summary] = details.props.children;
+  assert.equal(textOf(summary), "Gist");
+});
+
+test("detailsWithoutSummary_fallsBackToDefaultLabel", () => {
+  const nodes = renderDevMarkdown("<details>\nbody\n</details>");
+  const [details] = elements(nodes, "details");
+  const [summary] = details.props.children;
+  assert.equal(textOf(summary), "Details");
+});
+
+test("nestedDetails_staysInsideOuterBody", () => {
+  const nodes = renderDevMarkdown(
+    "<details>\n<summary>outer</summary>\n<details>\n<summary>inner</summary>\ndeep\n</details>\n</details>\nafter",
+  );
+  const outer = elements(nodes, "details");
+  assert.equal(outer.length, 1);
+  const [, body] = outer[0].props.children;
+  const inner = elements(body.props.children, "details");
+  assert.equal(inner.length, 1);
+  assert.equal(textOf(elements(nodes, "p")[0]), "after");
+});
+
+test("unterminatedDetails_capturesRestOfMessage", () => {
+  const nodes = renderDevMarkdown("<details>\n<summary>s</summary>\nrest");
+  const [details] = elements(nodes, "details");
+  const [, body] = details.props.children;
+  assert.equal(textOf(body), "rest");
+});
+
+test("detailsBody_rendersBlockMarkdown", () => {
+  const nodes = renderDevMarkdown(
+    "<details>\n<summary>code</summary>\n\n```ts\nconst a = 1;\n```\n</details>",
+  );
+  const [details] = elements(nodes, "details");
+  const [, body] = details.props.children;
+  const blocks = elements(body.props.children, DevCodeBlock);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].props.code, "const a = 1;");
+});
+
+test("listItem_joinsIndentedContinuationLines", () => {
+  const nodes = renderDevMarkdown("- first line\n  second line\n- next item");
+  assert.equal(nodes.length, 2);
+  assert.equal(textOf(nodes[0].props.children[1]), "first line\nsecond line");
+  assert.equal(textOf(nodes[1].props.children[1]), "next item");
+});
+
+test("listContinuation_stopsAtBlankLineAndUnindentedText", () => {
+  const nodes = renderDevMarkdown("- item\n\nparagraph");
+  assert.equal(textOf(nodes[0].props.children[1]), "item");
+  assert.equal(elements(nodes, "p").length, 1);
+});
+
+test("nestedListItem_isNotAContinuation", () => {
+  const nodes = renderDevMarkdown("- top\n  - nested");
+  assert.equal(nodes.length, 2);
+  assert.equal(textOf(nodes[0].props.children[1]), "top");
+});
+
+test("indentedFenceAfterListItem_staysACodeBlock", () => {
+  const nodes = renderDevMarkdown("- item\n  ```\n  code\n  ```");
+  assert.equal(textOf(nodes[0].props.children[1]), "item");
+  assert.equal(elements(nodes, DevCodeBlock).length, 1);
 });

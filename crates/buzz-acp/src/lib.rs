@@ -3767,6 +3767,16 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_teaches_native_formatting_and_details_folding() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("```diff gets +/− line coloring"));
+        assert!(prompt.contains("`<details>` folds all render natively"));
+        assert!(prompt.contains("Fold long output"));
+        assert!(prompt.contains("`<summary>one-line gist</summary>`"));
+        assert!(prompt.contains("Keep conclusions and asks outside the fold"));
+    }
+
+    #[test]
     fn shared_base_prompt_requires_origin_message_commit_trailer() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("Every commit created while handling a Buzz message MUST include"));
