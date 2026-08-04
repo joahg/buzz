@@ -26,6 +26,46 @@ const QUOTE_RE = /^ {0,3}>\s?(.*)$/;
 /** A standalone `![alt](url)` line — the shape `buildOutgoingMessage` emits
  * for image/video attachments (URLs are paren- and space-free). */
 const MEDIA_LINE_RE = /^!\[([^\]]*)\]\((\S+)\)\s*$/;
+/** GFM table rows must start and end with a pipe — looser forms stay prose. */
+const TABLE_ROW_RE = /^\s{0,3}\|.*\|\s*$/;
+const TABLE_DELIM_RE = /^\s{0,3}\|(?:\s*:?-+:?\s*\|)+\s*$/;
+
+type CellAlign = "left" | "center" | "right";
+
+/** Split a `| a | b |` row into trimmed cell strings, honoring `\|` escapes. */
+function splitTableRow(line: string): string[] {
+  const inner = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let cell = "";
+  for (let j = 0; j < inner.length; j++) {
+    const ch = inner[j];
+    if (ch === "\\" && inner[j + 1] === "|") {
+      cell += "|";
+      j += 1;
+    } else if (ch === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += ch;
+    }
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function delimiterAlign(cell: string): CellAlign {
+  const left = cell.startsWith(":");
+  const right = cell.endsWith(":");
+  if (left && right) return "center";
+  if (right) return "right";
+  return "left";
+}
+
+const ALIGN_CLASS: Record<CellAlign, string> = {
+  left: "text-left",
+  center: "text-center",
+  right: "text-right",
+};
 
 /**
  * One attached image or video in a dev-mode transcript, rendered through the
@@ -166,6 +206,66 @@ export function renderDevMarkdown(
       );
       i += 1;
       continue;
+    }
+
+    if (
+      TABLE_ROW_RE.test(line) &&
+      i + 1 < lines.length &&
+      TABLE_DELIM_RE.test(lines[i + 1])
+    ) {
+      const header = splitTableRow(line);
+      const aligns = splitTableRow(lines[i + 1]).map(delimiterAlign);
+      if (header.length === aligns.length) {
+        flushParagraph();
+        i += 2;
+        const rows: string[][] = [];
+        while (i < lines.length && TABLE_ROW_RE.test(lines[i])) {
+          rows.push(splitTableRow(lines[i]));
+          i += 1;
+        }
+        nodes.push(
+          <div key={`t${nodes.length}`} className="my-1 overflow-x-auto">
+            <table className="border-collapse">
+              <thead>
+                <tr>
+                  {header.map((cell, c) => (
+                    <th
+                      // biome-ignore lint/suspicious/noArrayIndexKey: columns are positional and never reordered
+                      key={c}
+                      className={cn(
+                        "border border-border/50 bg-muted/40 px-2 py-0.5 font-semibold",
+                        ALIGN_CLASS[aligns[c]],
+                      )}
+                    >
+                      {inline(cell)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, r) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional and never reordered
+                  <tr key={r}>
+                    {header.map((_, c) => (
+                      <td
+                        // biome-ignore lint/suspicious/noArrayIndexKey: columns are positional and never reordered
+                        key={c}
+                        className={cn(
+                          "border border-border/50 px-2 py-0.5 align-top",
+                          ALIGN_CLASS[aligns[c]],
+                        )}
+                      >
+                        {inline(row[c] ?? "")}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>,
+        );
+        continue;
+      }
     }
 
     const item = LIST_ITEM_RE.exec(line);

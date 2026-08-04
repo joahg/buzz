@@ -90,3 +90,81 @@ test("hyphenListItem_isNotAHorizontalRule", () => {
   const nodes = renderDevMarkdown("- item");
   assert.equal(textOf(nodes[0].props.children[0]), "•");
 });
+
+function findTable(nodes) {
+  for (const node of nodes) {
+    if (typeof node !== "object" || node === null) continue;
+    if (node.type === "table") return node;
+    const child = node.props?.children;
+    const kids = Array.isArray(child) ? child : child ? [child] : [];
+    const found = findTable(kids);
+    if (found) return found;
+  }
+  return null;
+}
+
+function tableCells(table) {
+  const [thead, tbody] = table.props.children;
+  const headerRow = thead.props.children;
+  const header = headerRow.props.children.map(textOf);
+  const bodyRows = tbody.props.children.map((row) =>
+    row.props.children.map(textOf),
+  );
+  return { header, bodyRows };
+}
+
+test("gfmTable_rendersHeaderAndBodyCells", () => {
+  const nodes = renderDevMarkdown(
+    "| Flag | Default |\n|---|---|\n| `a` | false |\n| `b` | true |",
+  );
+  const table = findTable(nodes);
+  assert.ok(table);
+  const { header, bodyRows } = tableCells(table);
+  assert.deepEqual(header, ["Flag", "Default"]);
+  assert.deepEqual(bodyRows, [
+    ["a", "false"],
+    ["b", "true"],
+  ]);
+});
+
+test("gfmTable_shortRowPadsMissingCells", () => {
+  const nodes = renderDevMarkdown("| a | b |\n|---|---|\n| only |");
+  const { bodyRows } = tableCells(findTable(nodes));
+  assert.deepEqual(bodyRows, [["only", ""]]);
+});
+
+test("gfmTable_alignmentFromDelimiterRow", () => {
+  const nodes = renderDevMarkdown(
+    "| l | c | r |\n|:--|:-:|--:|\n| 1 | 2 | 3 |",
+  );
+  const table = findTable(nodes);
+  const headerRow = table.props.children[0].props.children;
+  const classes = headerRow.props.children.map((th) => th.props.className);
+  assert.ok(classes[0].includes("text-left"));
+  assert.ok(classes[1].includes("text-center"));
+  assert.ok(classes[2].includes("text-right"));
+});
+
+test("gfmTable_escapedPipeStaysInCell", () => {
+  const nodes = renderDevMarkdown("| a | b |\n|---|---|\n| x \\| y | z |");
+  const { bodyRows } = tableCells(findTable(nodes));
+  assert.deepEqual(bodyRows, [["x | y", "z"]]);
+});
+
+test("pipeLineWithoutDelimiterRow_staysParagraph", () => {
+  const nodes = renderDevMarkdown("| not | a table |\nplain text");
+  assert.equal(findTable(nodes), null);
+  assert.equal(elements(nodes, "p").length, 1);
+});
+
+test("delimiterCountMismatch_staysParagraph", () => {
+  const nodes = renderDevMarkdown("| a | b | c |\n|---|---|\n| 1 | 2 |");
+  assert.equal(findTable(nodes), null);
+});
+
+test("tableEndsAtFirstNonRowLine", () => {
+  const nodes = renderDevMarkdown("| a |\n|---|\n| 1 |\nafter");
+  assert.ok(findTable(nodes));
+  assert.equal(elements(nodes, "p").length, 1);
+  assert.equal(textOf(elements(nodes, "p")[0]), "after");
+});
