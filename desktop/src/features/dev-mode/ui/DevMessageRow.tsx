@@ -212,6 +212,8 @@ export function DevMessageRow({
   resolveIsAgent: AgentResolver;
 }) {
   const isSelf = event.pubkey === currentPubkey;
+  const isHuman = !resolveIsAgent(event.pubkey);
+  const authorColor = resolveColor(event.pubkey);
   const { channels, openChannel } = useChannelRefs();
   // Stable per-event identity so the media renderer's memo holds.
   const imetaByUrl = React.useMemo(
@@ -236,22 +238,31 @@ export function DevMessageRow({
   // A leading `@Name` mention on a human message is direction, not prose:
   // it renders as a "to Name" line under the author instead of inside the
   // message body. Agent replies keep their mentions inline as normal text.
-  const directed = resolveIsAgent(event.pubkey)
-    ? null
-    : matchLeadingMention(event.content, mentionStyles);
+  const directed = isHuman
+    ? matchLeadingMention(event.content, mentionStyles)
+    : null;
   const bodyContent = directed
     ? event.content.slice(directed.end)
     : event.content;
 
   return (
-    <div className="group/devrow min-w-0 py-1 text-sm leading-6">
+    // Humans are rare in agent-heavy channels — a left accent bar in the
+    // author's color makes their messages scannable. The negative margin
+    // cancels the bar+padding width so bodies stay aligned with agent rows.
+    <div
+      className={cn(
+        "group/devrow min-w-0 py-1 text-sm leading-6",
+        isHuman && "-ml-[10px] border-l-2 pl-2",
+      )}
+      style={isHuman ? { borderLeftColor: authorColor } : undefined}
+    >
       <div className="flex min-w-0 items-baseline gap-2">
         <span
           className={cn(
             "shrink-0 font-medium",
             isSelf && "underline decoration-dotted underline-offset-4",
           )}
-          style={{ color: resolveColor(event.pubkey) }}
+          style={{ color: authorColor }}
         >
           {resolveName(event.pubkey)}
         </span>
