@@ -32,6 +32,7 @@ import {
   useMemberNameResolver,
 } from "@/features/dev-mode/lib/useMemberNameResolver";
 import { selectUnreadThreadRoots } from "@/features/dev-mode/lib/unreadThreads";
+import { useInitialThreadLoadSettled } from "@/features/dev-mode/lib/useInitialThreadLoadSettled";
 import { usePinnedScroll } from "@/features/dev-mode/lib/usePinnedScroll";
 import { DevMessageRow } from "@/features/dev-mode/ui/DevMessageRow";
 import {
@@ -334,8 +335,6 @@ export function DevTranscript({
   useChannelSubscription(channel);
   const { getThreadReadAt, readStateVersion } = useAppShell();
 
-  const { scrollRef, contentRef, handleScroll } = usePinnedScroll(channel.id);
-
   const { fetchOlder, hasOlderMessages, isFetchingOlder } =
     useFetchOlderMessages(channel);
 
@@ -343,6 +342,39 @@ export function DevTranscript({
     () => selectRootEvents(messagesQuery.data),
     [messagesQuery.data],
   );
+
+  const threadSummaries = React.useMemo(
+    () =>
+      windowQuery.data
+        ? channelWindowThreadSummaries(windowQuery.data)
+        : new Map<string, ChannelWindowThreadSummary>(),
+    [windowQuery.data],
+  );
+
+  const replyCounts = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const [rootId, summary] of threadSummaries) {
+      counts.set(rootId, summary.replyCount);
+    }
+    return counts;
+  }, [threadSummaries]);
+
+  // The bottom pin stays held until every inline thread subtree has loaded,
+  // so the scroll position is computed from the full content — entering a
+  // channel must not leave the view stranded above the newest messages.
+  const initialLoadSettled = useInitialThreadLoadSettled({
+    channelId: channel.id,
+    messagesReady: messagesQuery.isSuccess,
+    windowReady: windowQuery.isSuccess,
+    roots,
+    replyCounts,
+  });
+
+  const { scrollRef, contentRef, handleScroll } = usePinnedScroll(
+    channel.id,
+    !initialLoadSettled,
+  );
+
   // Which roots carry an edit — drives the "(edited)" marker (the edited
   // content itself is already applied inside selectRootEvents).
   const rootEdits = React.useMemo(
@@ -430,22 +462,6 @@ export function DevTranscript({
     scrollContainerRef: scrollRef,
     sentinelRef: topSentinelRef,
   });
-
-  const threadSummaries = React.useMemo(
-    () =>
-      windowQuery.data
-        ? channelWindowThreadSummaries(windowQuery.data)
-        : new Map<string, ChannelWindowThreadSummary>(),
-    [windowQuery.data],
-  );
-
-  const replyCounts = React.useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const [rootId, summary] of threadSummaries) {
-      counts.set(rootId, summary.replyCount);
-    }
-    return counts;
-  }, [threadSummaries]);
 
   // Threads with replies past the read frontier — carries the per-card
   // unread dot. readStateVersion invalidates when any read marker moves.

@@ -19,8 +19,8 @@ import {
   indexSubChannels,
 } from "@/features/dev-mode/lib/subChannels";
 import { selectRootEvents } from "@/features/dev-mode/lib/transcriptRoots";
+import { useChannelStatuses } from "@/features/dev-mode/lib/useChannelStatuses";
 import { useShellFocusGuards } from "@/features/dev-mode/lib/useShellFocusGuards";
-import { useUnreadRouting } from "@/features/dev-mode/lib/useUnreadRouting";
 import { useDevWorkingChannelIds } from "@/features/dev-mode/lib/useDevWorkingChannelIds";
 import { useDevUnreadNavigatorIds } from "@/features/dev-mode/lib/useDevUnreadNavigatorIds";
 import {
@@ -41,6 +41,7 @@ import { useDevShellNavigation } from "@/features/dev-mode/lib/useDevShellNaviga
 import { useNavigatorWidth } from "@/features/dev-mode/lib/useNavigatorWidth";
 import { DevChannelNavigator } from "@/features/dev-mode/ui/DevChannelNavigator";
 import { DevChannelTabs } from "@/features/dev-mode/ui/DevChannelTabs";
+import { DevInbox } from "@/features/dev-mode/ui/DevInbox";
 import { DevMentionTickerTopBar } from "@/features/dev-mode/ui/DevMentionTickerTopBar";
 import { DevCommandPalette } from "@/features/dev-mode/ui/DevCommandPalette";
 import { DevAgentStatusLine } from "@/features/dev-mode/ui/DevAgentStatusLine";
@@ -52,7 +53,9 @@ import { DevTranscript } from "@/features/dev-mode/ui/DevTranscript";
 import { useChannelMessagesQuery } from "@/features/messages/hooks";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import type { DevMentionTickerItem } from "@/features/dev-mode/lib/mentionTicker";
@@ -74,7 +77,6 @@ type ShellView = "fresh" | "navigator" | "channel";
 
 export function DevModeShell({
   unreadChannelIds,
-  topLevelUnreadChannelIds,
   highPriorityUnreadChannelIds,
   blockedUnreadChannelIds,
   mentionTicker,
@@ -82,8 +84,6 @@ export function DevModeShell({
   hasCommunityRail = false,
 }: {
   unreadChannelIds: ReadonlySet<string>;
-  /** Channels with unread channel-level posts only. */
-  topLevelUnreadChannelIds: ReadonlySet<string>;
   highPriorityUnreadChannelIds: ReadonlySet<string>;
   blockedUnreadChannelIds: ReadonlySet<string>;
   mentionTicker: DevMentionTickerItem | null;
@@ -120,11 +120,14 @@ export function DevModeShell({
   const [subDraftParentId, setSubDraftParentId] = React.useState<string | null>(
     null,
   );
-  const [paletteOpen, setPaletteOpen] = React.useState(false);
+  // One overlay at a time — palette, shortcuts help, and inbox replace each
+  // other instead of stacking.
+  const [overlay, setOverlay] = React.useState<
+    "palette" | "shortcuts" | "inbox" | null
+  >(null);
   const [paletteInitialMode, setPaletteInitialMode] = React.useState<
     "root" | "members"
   >("root");
-  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   const [focusSignal, setFocusSignal] = React.useState(0);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -185,6 +188,10 @@ export function DevModeShell({
   // `parent--sub` channels pair with their parents: only mains render in
   // the left list; subs surface as tabs inside their parent.
   const subIndex = React.useMemo(() => indexSubChannels(sessions), [sessions]);
+  const channelStatuses = useChannelStatuses(
+    subIndex,
+    identityQuery.data?.pubkey ?? null,
+  );
   // The left list orders mains by their whole family's latest activity, so
   // a busy sub-channel floats its parent.
   const listChannels = React.useMemo(() => {
@@ -306,19 +313,28 @@ export function DevModeShell({
   const navigatorWidthControls = useNavigatorWidth();
 
   const closePalette = React.useCallback(() => {
-    setPaletteOpen(false);
+    setOverlay(null);
     focusComposer();
   }, [focusComposer]);
 
   const openPalette = React.useCallback((mode: "root" | "members" = "root") => {
     setPaletteInitialMode(mode);
-    setPaletteOpen(true);
+    setOverlay("palette");
   }, []);
 
   const closeShortcuts = React.useCallback(() => {
-    setShortcutsOpen(false);
+    setOverlay(null);
     focusComposer();
   }, [focusComposer]);
+
+  const closeInbox = React.useCallback(() => {
+    setOverlay(null);
+    focusComposer();
+  }, [focusComposer]);
+
+  const toggleInbox = React.useCallback(() => {
+    setOverlay((current) => (current === "inbox" ? null : "inbox"));
+  }, []);
 
   const openChannel = React.useCallback(
     (channelId: string) => {
@@ -364,16 +380,6 @@ export function DevModeShell({
     setSubDraftParentId(null);
     stopEditing();
   }, [effectiveSessionId]);
-
-  const openChannelAtUnread = useUnreadRouting({
-    subIndex,
-    unreadChannelIds,
-    topLevelUnreadChannelIds,
-    activeChannel,
-    roots,
-    openChannel,
-    openThread: handleOpenThread,
-  });
 
   useDevRouteSync({
     seed: routeSeed,
@@ -442,15 +448,17 @@ export function DevModeShell({
 
   const togglePalette = React.useCallback(() => {
     setPaletteInitialMode("root");
-    setPaletteOpen((current) => !current);
+    setOverlay((current) => (current === "palette" ? null : "palette"));
   }, []);
 
   useDevModeShortcuts({
     view,
+    overlayOpen: overlay !== null,
     activeChannel,
     activeMainChannel,
     activeSubChannels,
     onTogglePalette: togglePalette,
+    onToggleInbox: toggleInbox,
     onNewSession: goToFresh,
     onDraftSideChat:
       view === "channel" && activeSessionId ? draftSideChat : null,
@@ -544,7 +552,7 @@ export function DevModeShell({
         !prompt && media.length > 0 && view === "channel" && activeChannel;
       if (!prompt && !mediaOnlySend) {
         if (view === "navigator" && navigatorId) {
-          openChannelAtUnread(navigatorId);
+          openChannel(navigatorId);
           return;
         }
         // Empty-input Enter opens the selected card's side chat.
@@ -610,7 +618,7 @@ export function DevModeShell({
       input,
       mode,
       navigatorId,
-      openChannelAtUnread,
+      openChannel,
       rememberMode,
       restoreFailedPrompt,
       selectedRootId,
@@ -664,14 +672,30 @@ export function DevModeShell({
         ? `Prompt ${devComposerModeLabel(mode)} — spawns a new channel where it works…`
         : "Start a discussion — spawns a new channel for humans…";
 
+  // Inbox quick replies mention the session's own agent when one is
+  // identifiable — the composer agent mode already a member of the target
+  // channel (the sent message shows the mention) — else plain chat, so a
+  // quick reply never attaches an unrelated agent to the channel.
+  const handleInboxSend = React.useCallback(
+    async (target: Channel, text: string) => {
+      const members = new Set(target.memberPubkeys.map(normalizePubkey));
+      const agentMode = modes.find(
+        (candidate) =>
+          candidate.kind === "agent" &&
+          members.has(normalizePubkey(candidate.target.pubkey)),
+      );
+      await sendToSession(target, text, agentMode ?? { kind: "chat" });
+    },
+    [modes, sendToSession],
+  );
+
   const composerActive =
-    !paletteOpen &&
-    !shortcutsOpen &&
+    overlay === null &&
     !(threadOpen && activePane === "thread") &&
     !cardSelectionActive;
 
   useCardSelectionShortcuts({
-    active: cardSelectionActive && !paletteOpen && !shortcutsOpen,
+    active: cardSelectionActive && overlay === null,
     onEditSelected: startEditingSelected,
     onEscape: handleEscape,
     onNavigate: navigateCards,
@@ -717,7 +741,7 @@ export function DevModeShell({
       onEscape={handleEscape}
       onNavigate={handleNavigate}
       onOpenPalette={() => openPalette()}
-      onOpenShortcuts={() => setShortcutsOpen(true)}
+      onOpenShortcuts={() => setOverlay("shortcuts")}
       onStepChannel={stepChannel}
       onReactivate={() => {
         if (cardSelectionActive) setSelectedRootId(null);
@@ -788,6 +812,18 @@ export function DevModeShell({
             >
               buzz · developer mode
             </span>
+            <button
+              className={cn(
+                "ml-auto shrink-0 cursor-pointer pr-2 text-muted-foreground/70 hover:text-foreground",
+                macChrome && "translate-y-[3px]",
+              )}
+              data-testid="dev-mode-inbox-toggle"
+              onClick={toggleInbox}
+              title="Inbox — channels active in the last 24h (⌘⇧I)"
+              type="button"
+            >
+              inbox
+            </button>
           </div>
           <div
             className="flex h-full min-w-0 flex-1 items-center justify-between gap-3 pr-4 pl-4"
@@ -810,11 +846,12 @@ export function DevModeShell({
         <div className="flex min-h-0 min-w-0 flex-1">
           <DevChannelNavigator
             blockedChannelIds={navigatorBlockedIds}
+            channelStatuses={channelStatuses}
             dimmed={view === "channel"}
             groups={channelGroups}
             highlightedId={view === "fresh" ? null : navigatorId}
             highPriorityChannelIds={navigatorHighPriorityIds}
-            onOpen={openChannelAtUnread}
+            onOpen={openChannel}
             unreadChannelIds={navigatorUnreadIds}
             workingChannelIds={navigatorWorkingIds}
             widthControls={navigatorWidthControls}
@@ -910,7 +947,7 @@ export function DevModeShell({
           </>
         ) : null}
 
-        {paletteOpen ? (
+        {overlay === "palette" ? (
           <DevCommandPalette
             activeChannel={topBarChannel}
             channels={[...sessions].reverse()}
@@ -920,7 +957,7 @@ export function DevModeShell({
             onChannelLeft={handleChannelLeft}
             onClose={closePalette}
             onNewSession={goToFresh}
-            onShowShortcuts={() => setShortcutsOpen(true)}
+            onShowShortcuts={() => setOverlay("shortcuts")}
             onNewSubChannel={
               view === "channel" && activeMainChannel
                 ? startSubChannelDraft
@@ -937,8 +974,20 @@ export function DevModeShell({
           />
         ) : null}
 
-        {shortcutsOpen ? (
+        {overlay === "shortcuts" ? (
           <DevShortcutsOverlay onClose={closeShortcuts} />
+        ) : null}
+
+        {overlay === "inbox" ? (
+          <DevInbox
+            myPubkey={identityQuery.data?.pubkey ?? null}
+            onClose={closeInbox}
+            onOpenChannel={openChannel}
+            onSend={handleInboxSend}
+            statuses={channelStatuses}
+            subIndex={subIndex}
+            unreadMainIds={navigatorUnreadIds}
+          />
         ) : null}
       </div>
     </DevChannelRefsProvider>

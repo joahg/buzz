@@ -825,7 +825,6 @@ export function AppShell() {
                         highPriorityUnreadChannelIds={priorityUnreadIds}
                         mentionTicker={mentionTicker}
                         onDismissMentionTicker={dismissMentionTicker}
-                        topLevelUnreadChannelIds={parentUnreadIds}
                         unreadChannelIds={unreadChannelIds}
                       />
                     </React.Suspense>

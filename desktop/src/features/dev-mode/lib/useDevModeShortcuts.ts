@@ -6,6 +6,7 @@ import type { Channel } from "@/shared/api/types";
  * Window-level developer mode shortcuts:
  *
  * - ⌘K toggles the command palette
+ * - ⌘⇧I toggles the inbox
  * - ⌘N jumps to the fresh composer (new channel)
  * - ⌘T drafts a side chat in the open channel
  * - ⌘⇧T drafts a new tab (sub-channel) of the open main
@@ -14,20 +15,25 @@ import type { Channel } from "@/shared/api/types";
  */
 export function useDevModeShortcuts({
   view,
+  overlayOpen,
   activeChannel,
   activeMainChannel,
   activeSubChannels,
   onTogglePalette,
+  onToggleInbox,
   onNewSession,
   onDraftSideChat,
   onDraftTab,
   onOpenChannel,
 }: {
   view: "fresh" | "navigator" | "channel";
+  /** While an overlay is up, only its toggles work — no navigation. */
+  overlayOpen: boolean;
   activeChannel: Channel | null;
   activeMainChannel: Channel | null;
   activeSubChannels: Channel[];
   onTogglePalette: () => void;
+  onToggleInbox: () => void;
   onNewSession: () => void;
   /** Null when the current view has no open channel to side-chat in. */
   onDraftSideChat: (() => void) | null;
@@ -55,6 +61,12 @@ export function useDevModeShortcuts({
       if (!event.metaKey || event.ctrlKey || event.altKey) return;
       const key = event.key.toLowerCase();
       if (event.shiftKey) {
+        if (key === "i") {
+          event.preventDefault();
+          onToggleInbox();
+          return;
+        }
+        if (overlayOpen) return;
         if (key === "t" && onDraftTab) {
           event.preventDefault();
           onDraftTab();
@@ -75,6 +87,7 @@ export function useDevModeShortcuts({
         }
         return;
       }
+      if (overlayOpen) return;
       if (key === "n") {
         event.preventDefault();
         onNewSession();
@@ -108,7 +121,9 @@ export function useDevModeShortcuts({
     onDraftTab,
     onNewSession,
     onOpenChannel,
+    onToggleInbox,
     onTogglePalette,
+    overlayOpen,
     view,
   ]);
 }

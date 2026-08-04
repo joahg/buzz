@@ -3,9 +3,9 @@ import { expect, test } from "@playwright/test";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 // Contextual unread in developer mode: unread threads and tabs bubble up to
-// the parent's navigator row, and opening an unread parent routes directly
-// to the tab — and thread side chat — that needs attention, instead of
-// landing on the parent's main view.
+// the parent's navigator row, but opening a channel always lands on its main
+// view — unread tabs keep their dots so the user can see what needs
+// attention and choose what to open.
 
 // The pubkey the mock bridge logs in as (mirrors `e2eBridge`'s self identity).
 const SELF_PUBKEY = "deadbeef".repeat(8);
@@ -26,7 +26,7 @@ async function openDevMode(page: import("@playwright/test").Page) {
 }
 
 // ArrowUp steps through channel previews newest-first; walk until the
-// target channel is previewed, then Enter opens it (with unread routing).
+// target channel is previewed, then Enter opens it.
 async function openChannelFromNavigator(
   page: import("@playwright/test").Page,
   channelName: string,
@@ -142,7 +142,7 @@ function navigatorRow(
     .first();
 }
 
-test("collapsed unread replies in a tab route the parent open to the side chat", async ({
+test("unread tab replies keep their dot until the user opens the thread", async ({
   page,
 }) => {
   await openDevMode(page);
@@ -196,14 +196,20 @@ test("collapsed unread replies in a tab route the parent open to the side chat",
     navigatorRow(page, "general").getByTestId("dev-mode-unread-dot"),
   ).toBeVisible();
 
-  // Opening the parent routes to the unread tab and opens the side chat on
-  // the unread thread, because part of it is not visible inline.
+  // Opening the parent lands on the main view — no auto-routing. The
+  // unread tab keeps its dot so the user can see what needs attention.
   await openChannelFromNavigator(page, "general");
+  await expect(tabs.nth(0)).toHaveAttribute("data-active", "true");
+  await expect(page.getByTestId("dev-mode-thread-panel")).toHaveCount(0);
+  const flakyTab = tabs.filter({ hasText: "flaky-ci" }).first();
+  await expect(flakyTab.getByRole("img", { name: "unread" })).toBeVisible();
+
+  // The user chooses to open the tab; collapsed replies still need the
+  // side chat, so the dot survives until the thread is read.
+  await flakyTab.click();
   await expect(topBar).toContainText("general--flaky-ci");
-  await expect(tabs.filter({ hasText: "flaky-ci" }).first()).toHaveAttribute(
-    "data-active",
-    "true",
-  );
+  await expect(page.getByTestId("dev-mode-thread-panel")).toHaveCount(0);
+  await page.getByTestId("dev-mode-more-replies").click();
   const threadPanel = page.getByTestId("dev-mode-thread-panel");
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel).toContainText("human: fix is up");
@@ -274,7 +280,7 @@ test("inline agent replies are read by viewing the channel, with no side chat", 
   await expect(page.getByTestId("dev-mode-thread-panel")).toHaveCount(0);
 });
 
-test("unread top-level post routes to its tab without opening a side chat", async ({
+test("unread top-level post marks its tab; viewing the tab clears it", async ({
   page,
 }) => {
   await openDevMode(page);
@@ -300,12 +306,15 @@ test("unread top-level post routes to its tab without opening a side chat", asyn
     navigatorRow(page, "general").getByTestId("dev-mode-unread-dot"),
   ).toBeVisible();
 
+  // Opening the parent lands on the main view; the unread tab keeps its
+  // dot until the user opens it.
   await openChannelFromNavigator(page, "general");
+  await expect(tabs.nth(0)).toHaveAttribute("data-active", "true");
+  const rollbackTab = tabs.filter({ hasText: "rollback" }).first();
+  await expect(rollbackTab.getByRole("img", { name: "unread" })).toBeVisible();
+
+  await rollbackTab.click();
   await expect(topBar).toContainText("general--rollback");
-  await expect(tabs.filter({ hasText: "rollback" }).first()).toHaveAttribute(
-    "data-active",
-    "true",
-  );
   await expect(page.getByTestId("dev-mode-thread-panel")).toHaveCount(0);
 
   // Viewing the tab clears the channel-level unread — no threads need to
@@ -313,6 +322,58 @@ test("unread top-level post routes to its tab without opening a side chat", asyn
   await expect(
     navigatorRow(page, "general").getByTestId("dev-mode-unread-dot"),
   ).toHaveCount(0);
+});
+
+test("right-click mark unread flags a read channel until it is reopened", async ({
+  page,
+}) => {
+  await openDevMode(page);
+  await openChannelFromNavigator(page, "general");
+  await page.getByTestId("dev-mode-transcript").waitFor();
+
+  // Back out so "general" is a read, inactive channel.
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(
+    navigatorRow(page, "general").getByTestId("dev-mode-unread-dot"),
+  ).toHaveCount(0);
+
+  await navigatorRow(page, "general").click({ button: "right" });
+  await page.getByTestId("dev-mode-mark-unread").click();
+  await expect(
+    navigatorRow(page, "general").getByTestId("dev-mode-unread-dot"),
+  ).toBeVisible();
+
+  // Reopening the channel clears the manual flag through the normal read
+  // path.
+  await openChannelFromNavigator(page, "general");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(
+    navigatorRow(page, "general").getByTestId("dev-mode-unread-dot"),
+  ).toHaveCount(0);
+});
+
+test("right-click mark unread on a tab flags it and bubbles to the parent", async ({
+  page,
+}) => {
+  await openDevMode(page);
+  await openChannelFromNavigator(page, "general");
+  await page.getByTestId("dev-mode-transcript").waitFor();
+  await createChannel(page, "general--parked");
+
+  const tabs = page.getByTestId("dev-mode-channel-tab");
+  await expect(tabs).toHaveCount(2);
+  const parkedTab = tabs.filter({ hasText: "parked" }).first();
+  await parkedTab.click({ button: "right" });
+  await page.getByTestId("dev-mode-mark-unread").click();
+  await expect(parkedTab.getByRole("img", { name: "unread" })).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(
+    navigatorRow(page, "general").getByTestId("dev-mode-unread-dot"),
+  ).toBeVisible();
 });
 
 test("a read channel opens exactly where asked, with no routing", async ({

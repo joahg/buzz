@@ -10,8 +10,13 @@ export function channelWindowKey(channelId: string) {
   return ["channel-window", channelId] as const;
 }
 
+/** Prefix matching every thread-replies query in one channel. */
+export function threadRepliesChannelKey(channelId: string) {
+  return ["thread-replies", channelId] as const;
+}
+
 export function threadRepliesKey(channelId: string, rootId: string) {
-  return ["thread-replies", channelId, rootId] as const;
+  return [...threadRepliesChannelKey(channelId), rootId] as const;
 }
 
 export function dedupeMessagesById(messages: RelayEvent[]) {

@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { parseSubChannelName } from "@/features/dev-mode/lib/subChannels";
+import { DevMarkUnreadMenu } from "@/features/dev-mode/ui/DevMarkUnreadMenu";
 import { DevWavyText } from "@/features/dev-mode/ui/DevWavyText";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -49,42 +50,45 @@ export function DevChannelTabs({
     const isBlocked = blockedChannelIds.has(channel.id);
     const isWorking = workingChannelIds.has(channel.id);
     return (
-      <button
-        key={channel.id}
-        ref={isActive ? scrollActiveIntoView : undefined}
-        className={cn(
-          "flex shrink-0 cursor-pointer items-baseline gap-1.5 border-b-2 px-2.5 py-1 text-xs",
-          isActive
-            ? "border-primary text-foreground"
-            : "border-transparent text-muted-foreground hover:text-foreground",
-        )}
-        data-testid="dev-mode-channel-tab"
-        data-active={isActive || undefined}
-        onClick={() => onSelect(channel.id)}
-        type="button"
-      >
-        <span className={cn("whitespace-nowrap", isUnread && "font-semibold")}>
-          {isWorking ? <DevWavyText text={label} /> : label}
-        </span>
-        {isUnread ? (
+      <DevMarkUnreadMenu key={channel.id} channelId={channel.id}>
+        <button
+          ref={isActive ? scrollActiveIntoView : undefined}
+          className={cn(
+            "flex shrink-0 cursor-pointer items-baseline gap-1.5 border-b-2 px-2.5 py-1 text-xs",
+            isActive
+              ? "border-primary text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground",
+          )}
+          data-testid="dev-mode-channel-tab"
+          data-active={isActive || undefined}
+          onClick={() => onSelect(channel.id)}
+          type="button"
+        >
           <span
-            aria-label={
-              isBlocked ? "blocked" : isHighPriority ? "mentioned" : "unread"
-            }
-            className={cn(
-              "text-3xs leading-none",
-              isBlocked
-                ? "text-destructive"
-                : isHighPriority
-                  ? "text-primary"
-                  : "text-muted-foreground/60",
-            )}
-            role="img"
+            className={cn("whitespace-nowrap", isUnread && "font-semibold")}
           >
-            ●
+            {isWorking ? <DevWavyText text={label} /> : label}
           </span>
-        ) : null}
-      </button>
+          {isUnread ? (
+            <span
+              aria-label={
+                isBlocked ? "blocked" : isHighPriority ? "mentioned" : "unread"
+              }
+              className={cn(
+                "text-3xs leading-none",
+                isBlocked
+                  ? "text-destructive"
+                  : isHighPriority
+                    ? "text-primary"
+                    : "text-muted-foreground/60",
+              )}
+              role="img"
+            >
+              ●
+            </span>
+          ) : null}
+        </button>
+      </DevMarkUnreadMenu>
     );
   };
 

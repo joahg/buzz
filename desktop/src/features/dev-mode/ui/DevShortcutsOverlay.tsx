@@ -23,6 +23,7 @@ const SHORTCUT_GROUPS: {
     title: "global",
     shortcuts: [
       { keys: "⌘K", action: "command palette" },
+      { keys: "⌘⇧I", action: "inbox (channels active last 24h)" },
       { keys: "⌘N", action: "new channel" },
       { keys: "⌘T", action: "new side chat in the open channel" },
       { keys: "⌘⇧T", action: "new tab (sub-channel)" },

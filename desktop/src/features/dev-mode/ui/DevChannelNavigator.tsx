@@ -5,6 +5,7 @@ import {
   type ChannelGroup,
   toggleChannelPinned,
 } from "@/features/dev-mode/lib/pinnedChannels";
+import { DevMarkUnreadMenu } from "@/features/dev-mode/ui/DevMarkUnreadMenu";
 import { DevWavyText } from "@/features/dev-mode/ui/DevWavyText";
 import type { NavigatorWidthControls } from "@/features/dev-mode/lib/useNavigatorWidth";
 import type { Channel } from "@/shared/api/types";
@@ -30,6 +31,7 @@ function ChannelRow({
   isWorking,
   isHighPriority,
   isBlocked,
+  status,
   onOpen,
 }: {
   channel: Channel;
@@ -39,6 +41,7 @@ function ChannelRow({
   isWorking: boolean;
   isHighPriority: boolean;
   isBlocked: boolean;
+  status: string | undefined;
   onOpen: (channelId: string) => void;
 }) {
   const scrollHighlightedIntoView = React.useCallback(
@@ -49,82 +52,98 @@ function ChannelRow({
   );
 
   return (
-    <div
-      ref={isHighlighted ? scrollHighlightedIntoView : undefined}
-      className={cn(
-        "group relative flex items-baseline",
-        isHighlighted
-          ? "bg-primary/15 text-foreground"
-          : isUnread
-            ? "text-foreground hover:bg-muted/40"
-            : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
-      )}
-    >
-      <button
-        aria-label={
-          isPinned ? `Unpin # ${channel.name}` : `Pin # ${channel.name}`
-        }
-        className="flex w-5 shrink-0 cursor-pointer items-center self-stretch pl-2 text-muted-foreground/60 hover:text-foreground"
-        onClick={() => toggleChannelPinned(channel.id)}
-        type="button"
+    <DevMarkUnreadMenu channelId={channel.id}>
+      <div
+        ref={isHighlighted ? scrollHighlightedIntoView : undefined}
+        className={cn(
+          "group relative flex items-baseline",
+          isHighlighted
+            ? "bg-primary/15 text-foreground"
+            : isUnread
+              ? "text-foreground hover:bg-muted/40"
+              : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
+        )}
       >
-        {isHighlighted ? (
-          <span
-            aria-hidden
-            className="select-none text-foreground group-hover:hidden"
-          >
-            ▸
-          </span>
-        ) : null}
-        <Pin
-          aria-hidden
-          className={cn(
-            "size-3",
-            isPinned && "fill-current",
-            isHighlighted
-              ? "hidden group-hover:block"
-              : !isPinned && "opacity-0 group-hover:opacity-100",
-          )}
-        />
-      </button>
-      <button
-        className="flex min-w-0 flex-1 cursor-pointer items-baseline gap-2 rounded-none py-0.5 pl-2 pr-2 text-left text-sm"
-        data-testid={`dev-mode-channel-${channel.name}`}
-        onClick={() => onOpen(channel.id)}
-        type="button"
-      >
-        <span
-          className={cn(
-            "min-w-0 flex-1 truncate",
-            isUnread ? "font-semibold" : "font-medium",
-          )}
+        <button
+          aria-label={
+            isPinned ? `Unpin # ${channel.name}` : `Pin # ${channel.name}`
+          }
+          className="flex w-5 shrink-0 cursor-pointer items-center self-stretch pl-2 text-muted-foreground/60 hover:text-foreground"
+          onClick={() => toggleChannelPinned(channel.id)}
+          type="button"
         >
-          # {isWorking ? <DevWavyText text={channel.name} /> : channel.name}
-        </span>
-        {isUnread ? (
-          <span
-            data-testid="dev-mode-unread-dot"
-            role="img"
-            aria-label={
-              isBlocked ? "blocked" : isHighPriority ? "mentioned" : "unread"
-            }
+          {isHighlighted ? (
+            <span
+              aria-hidden
+              className="select-none text-foreground group-hover:hidden"
+            >
+              ▸
+            </span>
+          ) : null}
+          <Pin
+            aria-hidden
             className={cn(
-              "shrink-0 self-center text-3xs leading-none",
-              isBlocked
-                ? "text-destructive"
-                : isHighPriority
-                  ? "text-primary"
-                  : "text-muted-foreground/60",
+              "size-3",
+              isPinned && "fill-current",
+              isHighlighted
+                ? "hidden group-hover:block"
+                : !isPinned && "opacity-0 group-hover:opacity-100",
             )}
-          >
-            ●
+          />
+        </button>
+        <button
+          className="flex min-w-0 flex-1 cursor-pointer flex-col rounded-none py-0.5 pl-2 pr-2 text-left text-sm"
+          data-testid={`dev-mode-channel-${channel.name}`}
+          onClick={() => onOpen(channel.id)}
+          type="button"
+        >
+          <span className="flex w-full min-w-0 items-baseline gap-2">
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate",
+                isUnread ? "font-semibold" : "font-medium",
+              )}
+            >
+              # {isWorking ? <DevWavyText text={channel.name} /> : channel.name}
+            </span>
+            {isUnread ? (
+              <span
+                data-testid="dev-mode-unread-dot"
+                role="img"
+                aria-label={
+                  isBlocked
+                    ? "blocked"
+                    : isHighPriority
+                      ? "mentioned"
+                      : "unread"
+                }
+                className={cn(
+                  "shrink-0 self-center text-3xs leading-none",
+                  isBlocked
+                    ? "text-destructive"
+                    : isHighPriority
+                      ? "text-primary"
+                      : "text-muted-foreground/60",
+                )}
+              >
+                ●
+              </span>
+            ) : null}
+            <span className="shrink-0 text-xs text-muted-foreground/60">
+              {formatRelativeTime(channel.lastMessageAt)}
+            </span>
           </span>
-        ) : null}
-        <span className="shrink-0 text-xs text-muted-foreground/60">
-          {formatRelativeTime(channel.lastMessageAt)}
-        </span>
-      </button>
-    </div>
+          {status ? (
+            <span
+              className="w-full truncate text-xs text-muted-foreground/50"
+              data-testid="dev-mode-channel-status"
+            >
+              {status}
+            </span>
+          ) : null}
+        </button>
+      </div>
+    </DevMarkUnreadMenu>
   );
 }
 
@@ -142,6 +161,7 @@ export function DevChannelNavigator({
   workingChannelIds,
   highPriorityChannelIds,
   blockedChannelIds,
+  channelStatuses,
   highlightedId,
   dimmed,
   widthControls,
@@ -153,6 +173,8 @@ export function DevChannelNavigator({
   workingChannelIds: ReadonlySet<string>;
   highPriorityChannelIds: ReadonlySet<string>;
   blockedChannelIds: ReadonlySet<string>;
+  /** Short LLM-generated status line per main channel id. */
+  channelStatuses: ReadonlyMap<string, string>;
   highlightedId: string | null;
   /** True while a channel is focused — the list stays visible but recedes. */
   dimmed: boolean;
@@ -197,6 +219,7 @@ export function DevChannelNavigator({
                   isWorking={workingChannelIds.has(channel.id)}
                   isHighPriority={highPriorityChannelIds.has(channel.id)}
                   isBlocked={blockedChannelIds.has(channel.id)}
+                  status={channelStatuses.get(channel.id)}
                   onOpen={onOpen}
                 />
               ))}

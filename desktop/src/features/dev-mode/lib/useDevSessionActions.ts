@@ -19,6 +19,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { generateChannelTitle } from "@/features/dev-mode/lib/channelNaming";
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import { uniqueChannelName } from "@/features/dev-mode/lib/sessionNaming";
+import { recordUserActivity } from "@/features/dev-mode/lib/userActivity";
 import {
   appendSubChannelToParentCanvas,
   parseSubChannelName,
@@ -375,15 +376,18 @@ export function useDevSessionActions(identity: Identity | undefined) {
         media,
       );
 
-      return await sendMessageMutation.mutateAsync({
+      const sent = await sendMessageMutation.mutateAsync({
         targetChannel: channel,
         content,
         mentionPubkeys: mentionPubkeys.length > 0 ? mentionPubkeys : undefined,
         parentEventId: parentEventId ?? null,
         mediaTags,
       });
+      // Feeds the Inbox's "channels I've been active in" filter.
+      recordUserActivity(identity?.pubkey ?? null, channel.id);
+      return sent;
     },
-    [findParentChannel, sendMessageMutation],
+    [findParentChannel, identity, sendMessageMutation],
   );
 
   return {
