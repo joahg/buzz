@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
@@ -21,6 +22,8 @@ import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/dev_mode/author_colors.dart';
+import 'package:buzz/features/dev_mode/display_style_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
@@ -181,6 +184,8 @@ Widget _buildTestable({
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
   RelaySessionNotifier? relaySessionNotifier,
+  Set<String> botPubkeys = const {},
+  List<Override> extraOverrides = const [],
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -213,7 +218,7 @@ Widget _buildTestable({
       ),
       channelBotPubkeysProvider(
         _channelId,
-      ).overrideWith((ref) async => const <String>{}),
+      ).overrideWith((ref) async => botPubkeys),
       if (createChannelActions != null)
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
@@ -234,6 +239,7 @@ Widget _buildTestable({
         relaySessionProvider.overrideWith(() => relaySessionNotifier),
       // Compose bar drafts persist through SharedPreferences.
       savedPrefsProvider.overrideWithValue(_testPrefs),
+      ...extraOverrides,
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
@@ -3814,6 +3820,172 @@ void main() {
       );
     });
   });
+
+  group('Developer display style', () {
+    final devStyle = displayStyleProvider.overrideWith(
+      _DeveloperStyleNotifier.new,
+    );
+    const users = {
+      'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+      'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+    };
+
+    testWidgets('renders dense rows without avatars, authors in their color', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Hello world!',
+              createdAt: 1000,
+            ),
+            _textMsg(
+              id: 'msg2',
+              pubkey: 'bob',
+              content: 'Hey!',
+              createdAt: 1100,
+            ),
+          ],
+          users: users,
+          extraOverrides: [devStyle],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('dev-message-row-msg1')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('dev-message-row-msg2')),
+        findsOneWidget,
+      );
+      expect(find.byType(CircleAvatar), findsNothing);
+      expect(findRichText('Hello world!'), findsOneWidget);
+
+      final author = tester.widget<Text>(
+        find.byKey(const ValueKey('dev-message-author-msg1')),
+      );
+      expect(author.data, 'Alice');
+      expect(author.style?.fontFamily, 'GeistMono');
+      expect(author.style?.color, devAuthorColor('alice'));
+
+      // Everyone is human here (no bot pubkeys), so rows carry the
+      // author-colored left accent bar.
+      final accentBars = find.descendant(
+        of: find.byKey(const ValueKey('dev-message-row-msg1')),
+        matching: find.byWidgetPredicate((widget) {
+          if (widget is! Container) return false;
+          final decoration = widget.decoration;
+          return decoration is BoxDecoration &&
+              decoration.border is Border &&
+              (decoration.border! as Border).left.color ==
+                  devAuthorColor('alice');
+        }),
+      );
+      expect(accentBars, findsOneWidget);
+    });
+
+    testWidgets('lifts a leading directed mention into the header for humans', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: '@Bob ship it',
+              createdAt: 1000,
+              extraTags: [
+                ['p', 'bob'],
+              ],
+            ),
+          ],
+          users: users,
+          extraOverrides: [devStyle],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final directed = tester.widget<Text>(
+        find.byKey(const ValueKey('dev-message-directed-msg1')),
+      );
+      expect(directed.textSpan?.toPlainText(), 'to Bob');
+      expect(findRichText('ship it'), findsOneWidget);
+      expect(findRichText('@Bob ship it'), findsNothing);
+    });
+
+    testWidgets('keeps agent mentions inline without an accent bar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: '@Bob ship it',
+              createdAt: 1000,
+              extraTags: [
+                ['p', 'bob'],
+              ],
+            ),
+          ],
+          users: users,
+          botPubkeys: const {'alice'},
+          extraOverrides: [devStyle],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('dev-message-row-msg1')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('dev-message-directed-msg1')),
+        findsNothing,
+      );
+      final row = tester.widget<Container>(
+        find
+            .descendant(
+              of: find.byKey(const ValueKey('dev-message-row-msg1')),
+              matching: find.byType(Container),
+            )
+            .first,
+      );
+      expect(row.decoration, isNull);
+    });
+
+    testWidgets('standard style keeps the classic bubbles', (tester) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Hello world!',
+              createdAt: 1000,
+            ),
+          ],
+          users: users,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('message-row-msg1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('dev-message-row-msg1')), findsNothing);
+    });
+  });
+}
+
+class _DeveloperStyleNotifier extends DisplayStyleNotifier {
+  @override
+  DisplayStyle build() => DisplayStyle.developer;
 }
 
 Channel _channel({required String id, required String name}) => Channel(

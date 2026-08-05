@@ -64,6 +64,23 @@ class _MessageBubble extends ConsumerWidget {
       agentMentionPubkeys: agentMentionPubkeys,
     );
 
+    if (ref.watch(displayStyleProvider) == DisplayStyle.developer) {
+      return _DevMessageRow(
+        message: message,
+        displayName: displayName,
+        isHuman: !knownAgentPubkeys.contains(pk),
+        canManageMessage: canManageMessage,
+        mentionNames: resolvedMentionNames,
+        agentMentionPubkeys: agentMentionPubkeys,
+        channelNames: channelNames,
+        currentChannelId: currentChannelId,
+        currentPubkey: currentPubkey,
+        allMessages: allMessages,
+        isMember: isMember,
+        isArchived: isArchived,
+      );
+    }
+
     return Padding(
       padding: EdgeInsets.only(top: showAuthor ? Grid.xs : 0),
       child: Material(

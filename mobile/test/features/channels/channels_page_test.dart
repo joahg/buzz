@@ -8,8 +8,12 @@ import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
+import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
+import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
@@ -17,14 +21,26 @@ import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/features/dev_mode/display_style_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  // The display-style provider reads persisted prefs through
+  // [savedPrefsProvider], which production overrides in main().
+  late SharedPreferences testPrefs;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    testPrefs = await SharedPreferences.getInstance();
+  });
+
   Widget buildTestable({
     required List<Override> overrides,
     bool previewDirectory = false,
@@ -47,6 +63,7 @@ void main() {
         dmDirectoryPreviewEnabledProvider.overrideWith(
           (ref) => previewDirectory,
         ),
+        savedPrefsProvider.overrideWithValue(testPrefs),
         ...overrides,
       ],
       child: MaterialApp(
@@ -165,6 +182,226 @@ void main() {
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('developer style shows the dense family-grouped navigator', (
+    tester,
+  ) async {
+    final devChannels = [
+      Channel(
+        id: 'p1',
+        name: 'buzz-dev-mode',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        lastMessageAt: DateTime(2026, 8, 1),
+        isMember: true,
+      ),
+      Channel(
+        id: 's1',
+        name: 'buzz-dev-mode--releases',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        lastMessageAt: DateTime(2026, 8, 2),
+        isMember: true,
+      ),
+      testChannels[2],
+    ];
+
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(devChannels)),
+          displayStyleProvider.overrideWith(_DeveloperStyleNotifier.new),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('dev-channel-row-p1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dev-channel-row-s1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dev-channel-row-3')), findsOneWidget);
+    // The sub renders its short label, indented under the parent.
+    expect(find.text('buzz-dev-mode'), findsOneWidget);
+    expect(find.text('releases'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('releases')).dx,
+      greaterThan(tester.getTopLeft(find.text('buzz-dev-mode')).dx),
+    );
+    expect(find.text('DMS'), findsOneWidget);
+    // The standard sectioned list is replaced wholesale.
+    expect(find.text('Channels'), findsNothing);
+    expect(find.byTooltip('Channels options'), findsNothing);
+  });
+
+  List<Channel> devFamilyChannels() => [
+    Channel(
+      id: 'p1',
+      name: 'buzz-dev-mode',
+      channelType: 'stream',
+      visibility: 'open',
+      description: '',
+      createdBy: 'abc',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
+        30 * 1000,
+        isUtc: true,
+      ),
+      isMember: true,
+    ),
+    Channel(
+      id: 's1',
+      name: 'buzz-dev-mode--releases',
+      channelType: 'stream',
+      visibility: 'open',
+      description: '',
+      createdBy: 'abc',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
+        20 * 1000,
+        isUtc: true,
+      ),
+      isMember: true,
+    ),
+  ];
+
+  testWidgets('developer style: marking a parent read clears unread subs', (
+    tester,
+  ) async {
+    // Parent read; sub unread. The parent row carries the family's aggregate
+    // unread dot, so its "Mark Read" must clear the sub as well.
+    final readState = _FakeReadStateNotifier(
+      const ReadStateState(
+        isReady: true,
+        pubkey: 'pk',
+        contexts: {'p1': 30, 's1': 10},
+        version: 0,
+      ),
+    );
+
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(
+              devFamilyChannels(),
+              observedEventsByChannel: {
+                's1': [_observed(id: 'msg-s1', createdAt: 20)],
+              },
+            ),
+          ),
+          readStateProvider.overrideWith(() => readState),
+          displayStyleProvider.overrideWith(_DeveloperStyleNotifier.new),
+          currentPubkeyProvider.overrideWith((ref) => 'pk'),
+          channelMembersProvider('p1').overrideWith((ref) async => const []),
+          agentOwnersProvider.overrideWithValue(
+            const AsyncValue.data(<String, String>{}),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('dev-unread-dot-p1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dev-unread-dot-s1')), findsOneWidget);
+
+    await tester.longPress(find.byKey(const ValueKey('dev-channel-row-p1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Mark Read'));
+    await tester.pumpAndSettle();
+
+    expect(readState.markedContexts, containsPair('s1', 20));
+    expect(readState.markedContexts, containsPair('p1', 30));
+    expect(find.byKey(const ValueKey('dev-unread-dot-p1')), findsNothing);
+    expect(find.byKey(const ValueKey('dev-unread-dot-s1')), findsNothing);
+  });
+
+  testWidgets('developer style: a muted sub does not light up its parent', (
+    tester,
+  ) async {
+    final readState = _FakeReadStateNotifier(
+      const ReadStateState(
+        isReady: true,
+        pubkey: 'pk',
+        contexts: {'p1': 30, 's1': 10},
+        version: 0,
+      ),
+    );
+
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(
+              devFamilyChannels(),
+              observedEventsByChannel: {
+                's1': [_observed(id: 'msg-s1', createdAt: 20)],
+              },
+            ),
+          ),
+          readStateProvider.overrideWith(() => readState),
+          displayStyleProvider.overrideWith(_DeveloperStyleNotifier.new),
+          channelMutesProvider.overrideWith(
+            () => _FakeChannelMutesNotifier(
+              ChannelMuteStore(
+                channels: {
+                  's1': const ChannelMuteEntry(muted: true, updatedAt: 1),
+                },
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The muted sub keeps its own dot, but the aggregate on the parent
+    // ignores muted members.
+    expect(find.byKey(const ValueKey('dev-unread-dot-p1')), findsNothing);
+    expect(find.byKey(const ValueKey('dev-unread-dot-s1')), findsOneWidget);
+  });
+
+  testWidgets('developer style: a starred sub pins its whole family', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(devFamilyChannels()),
+          ),
+          displayStyleProvider.overrideWith(_DeveloperStyleNotifier.new),
+          channelStarsProvider.overrideWith(
+            () => _FakeChannelStarsNotifier(
+              ChannelStarStore(
+                channels: {
+                  's1': const ChannelStarEntry(starred: true, updatedAt: 1),
+                },
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('STARRED'), findsOneWidget);
+    // Both family rows render (under the starred section, not duplicated).
+    expect(find.byKey(const ValueKey('dev-channel-row-p1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dev-channel-row-s1')), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('buzz-dev-mode')).dy,
+      greaterThan(tester.getTopLeft(find.text('STARRED')).dy),
+    );
   });
 
   testWidgets('keeps the last channel above the floating tab bar', (
@@ -1693,3 +1930,28 @@ ObservedUnreadEvent _observed({
   channelType: 'stream',
   isThreadedReply: isThreadedReply,
 );
+
+class _DeveloperStyleNotifier extends DisplayStyleNotifier {
+  @override
+  DisplayStyle build() => DisplayStyle.developer;
+}
+
+class _FakeChannelMutesNotifier extends ChannelMutesNotifier {
+  _FakeChannelMutesNotifier(this._store);
+
+  final ChannelMuteStore _store;
+
+  @override
+  ChannelMutesState build() =>
+      ChannelMutesState(isReady: true, store: _store, version: 1);
+}
+
+class _FakeChannelStarsNotifier extends ChannelStarsNotifier {
+  _FakeChannelStarsNotifier(this._store);
+
+  final ChannelStarStore _store;
+
+  @override
+  ChannelStarsState build() =>
+      ChannelStarsState(isReady: true, store: _store, version: 1);
+}

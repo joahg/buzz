@@ -10,6 +10,27 @@ const _modeOptions = <({ThemeMode mode, String label, IconData icon})>[
 String _modeLabel(ThemeMode mode) =>
     _modeOptions.firstWhere((option) => option.mode == mode).label;
 
+const _displayStyleOptions =
+    <({DisplayStyle style, String label, IconData icon, String description})>[
+      (
+        style: DisplayStyle.standard,
+        label: 'Standard',
+        icon: LucideIcons.messageCircle,
+        description: 'Bubbles, avatars, and comfortable spacing.',
+      ),
+      (
+        style: DisplayStyle.developer,
+        label: 'Developer',
+        icon: LucideIcons.terminal,
+        description:
+            'Dense monospace transcript with per-author colors and '
+            'grouped sub-channels, like desktop dev mode.',
+      ),
+    ];
+
+String _displayStyleLabel(DisplayStyle style) =>
+    _displayStyleOptions.firstWhere((option) => option.style == style).label;
+
 class _AppearanceSection extends ConsumerWidget {
   const _AppearanceSection();
 
@@ -18,6 +39,7 @@ class _AppearanceSection extends ConsumerWidget {
     final mode = ref.watch(themeProvider);
     final schemeName = ref.watch(schemeProvider);
     final accentIndex = ref.watch(accentProvider);
+    final displayStyle = ref.watch(displayStyleProvider);
 
     return AppListCard(
       label: 'Style',
@@ -28,6 +50,13 @@ class _AppearanceSection extends ConsumerWidget {
           value: _modeLabel(mode),
           trailing: const _RowChevron(),
           onTap: () => _showAppearanceModeSheet(context),
+        ),
+        AppListRow(
+          icon: LucideIcons.terminal,
+          title: 'Display style',
+          value: _displayStyleLabel(displayStyle),
+          trailing: const _RowChevron(),
+          onTap: () => _showDisplayStyleSheet(context),
         ),
         AppListRow(
           icon: LucideIcons.palette,
@@ -105,6 +134,60 @@ class _AppearanceModeSheet extends ConsumerWidget {
                   ref.read(schemeProvider.notifier).setScheme(compatibleScheme);
                 }
                 ref.read(themeProvider.notifier).setMode(option.mode);
+                Navigator.of(context).pop();
+              },
+            ),
+          const SizedBox(height: Grid.xxs),
+        ],
+      ),
+    );
+  }
+}
+
+void _showDisplayStyleSheet(BuildContext context) {
+  showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (_) => const _DisplayStyleSheet(),
+  );
+}
+
+/// Standard / Developer, mirroring desktop dev mode's display-style toggle.
+class _DisplayStyleSheet extends ConsumerWidget {
+  const _DisplayStyleSheet();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final style = ref.watch(displayStyleProvider);
+
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xxs,
+            ),
+            child: Text('Display style', style: context.textTheme.titleMedium),
+          ),
+          for (final option in _displayStyleOptions)
+            AppListRow(
+              icon: option.icon,
+              title: option.label,
+              subtitle: option.description,
+              trailing: option.style == style
+                  ? Icon(
+                      LucideIcons.check,
+                      size: 18,
+                      color: context.colors.primary,
+                    )
+                  : null,
+              onTap: () {
+                ref.read(displayStyleProvider.notifier).setStyle(option.style);
                 Navigator.of(context).pop();
               },
             ),

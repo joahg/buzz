@@ -13,6 +13,7 @@ import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../dev_mode/display_style_provider.dart';
 import 'accent_picker_page.dart';
 import 'theme_picker_page.dart';
 

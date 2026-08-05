@@ -1,5 +1,54 @@
 part of '../channels_page.dart';
 
+/// Seeds missing read markers from each channel's `lastMessageAt` the first
+/// time read state becomes ready for a pubkey, so pre-existing history isn't
+/// reported as unread. Returns whether seeding has completed for the current
+/// read-state pubkey. Shared between the standard and dev-mode channel lists;
+/// callers must invoke it unconditionally (hook rules).
+bool _useInitialReadSeed({
+  required BuildContext context,
+  required WidgetRef ref,
+  required ReadStateState readState,
+  required List<Channel> visibleChannels,
+}) {
+  final initialSeedComplete = useState(false);
+  final seededPubkey = useRef<String?>(null);
+  final seedCompleteForPubkey =
+      seededPubkey.value == readState.pubkey && initialSeedComplete.value;
+
+  useEffect(() {
+    if (!readState.isReady) {
+      return null;
+    }
+
+    return deferReadStateUpdate(context, () {
+      if (seededPubkey.value != readState.pubkey) {
+        seededPubkey.value = readState.pubkey;
+        initialSeedComplete.value = false;
+      }
+
+      if (initialSeedComplete.value) {
+        return;
+      }
+
+      final notifier = ref.read(readStateProvider.notifier);
+      for (final channel in visibleChannels) {
+        if (readState.effectiveTimestamp(channel.id) != null) {
+          continue;
+        }
+
+        final lastMessageAt = dateTimeToUnixSeconds(channel.lastMessageAt);
+        if (lastMessageAt != null) {
+          notifier.seedContextRead(channel.id, lastMessageAt);
+        }
+      }
+      initialSeedComplete.value = true;
+    });
+  }, [readState.isReady, readState.pubkey, visibleChannels]);
+
+  return seedCompleteForPubkey;
+}
+
 class _ChannelsBody extends StatelessWidget {
   final List<Channel>? channels;
   final AsyncValue<List<Channel>> channelsAsync;
@@ -7,6 +56,7 @@ class _ChannelsBody extends StatelessWidget {
   final SessionStatus sessionStatus;
   final bool showConnectionSkeleton;
   final String? currentPubkey;
+  final bool devMode;
   final Future<void> Function() onRefresh;
   final Future<void> Function(Channel channel) onSelectChannel;
 
@@ -17,6 +67,7 @@ class _ChannelsBody extends StatelessWidget {
     required this.sessionStatus,
     required this.showConnectionSkeleton,
     required this.currentPubkey,
+    required this.devMode,
     required this.onRefresh,
     required this.onSelectChannel,
   });
@@ -40,11 +91,18 @@ class _ChannelsBody extends StatelessWidget {
             child: CustomScrollView(
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
-                _SliverChannelsList(
-                  channels: loadedChannels,
-                  currentPubkey: currentPubkey,
-                  onSelectChannel: onSelectChannel,
-                ),
+                if (devMode)
+                  _DevSliverChannelsList(
+                    channels: loadedChannels,
+                    currentPubkey: currentPubkey,
+                    onSelectChannel: onSelectChannel,
+                  )
+                else
+                  _SliverChannelsList(
+                    channels: loadedChannels,
+                    currentPubkey: currentPubkey,
+                    onSelectChannel: onSelectChannel,
+                  ),
               ],
             ),
           );
@@ -102,40 +160,12 @@ class _SliverChannelsList extends HookConsumerWidget {
     final channelsExpanded = useState(true);
     final dmsExpanded = useState(true);
     final sortState = ref.watch(channelSortProvider);
-    final initialSeedComplete = useState(false);
-    final seededPubkey = useRef<String?>(null);
-    final seedCompleteForPubkey =
-        seededPubkey.value == readState.pubkey && initialSeedComplete.value;
-
-    useEffect(() {
-      if (!readState.isReady) {
-        return null;
-      }
-
-      return deferReadStateUpdate(context, () {
-        if (seededPubkey.value != readState.pubkey) {
-          seededPubkey.value = readState.pubkey;
-          initialSeedComplete.value = false;
-        }
-
-        if (initialSeedComplete.value) {
-          return;
-        }
-
-        final notifier = ref.read(readStateProvider.notifier);
-        for (final channel in visibleChannels) {
-          if (readState.effectiveTimestamp(channel.id) != null) {
-            continue;
-          }
-
-          final lastMessageAt = dateTimeToUnixSeconds(channel.lastMessageAt);
-          if (lastMessageAt != null) {
-            notifier.seedContextRead(channel.id, lastMessageAt);
-          }
-        }
-        initialSeedComplete.value = true;
-      });
-    }, [readState.isReady, readState.pubkey, visibleChannels]);
+    final seedCompleteForPubkey = _useInitialReadSeed(
+      context: context,
+      ref: ref,
+      readState: readState,
+      visibleChannels: visibleChannels,
+    );
 
     final unreadState = _computeUnreadChannelState(
       channels: visibleChannels,

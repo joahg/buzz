@@ -24,6 +24,9 @@ import '../profile/profile_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
+import '../dev_mode/author_colors.dart';
+import '../dev_mode/display_style_provider.dart';
+import '../dev_mode/leading_mention.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_link_navigation.dart';
@@ -58,6 +61,7 @@ import 'timeline_message.dart';
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/message_bubble.dart';
+part 'channel_detail_page/dev_message_row.dart';
 part 'channel_detail_page/banners.dart';
 part 'channel_detail_page/app_bar.dart';
 

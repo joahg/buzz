@@ -29,6 +29,8 @@ import '../profile/presence_cache_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../pairing/pairing_page.dart';
 import '../pairing/pairing_provider.dart';
+import '../dev_mode/channel_family.dart';
+import '../dev_mode/display_style_provider.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_detail_page.dart';
@@ -49,6 +51,7 @@ import '../../shared/read_state/read_state_time.dart';
 import 'unread_badge/observed_unread_event.dart';
 
 part 'channels_page/body.dart';
+part 'channels_page/dev_navigator.dart';
 part 'channels_page/sections.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
@@ -257,6 +260,7 @@ class ChannelsPage extends HookConsumerWidget {
         sessionStatus: sessionState.status,
         showConnectionSkeleton: showConnectionSkeleton.value,
         currentPubkey: currentPubkey,
+        devMode: ref.watch(displayStyleProvider) == DisplayStyle.developer,
         onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
         onSelectChannel: openChannel,
       ),
