@@ -36,7 +36,6 @@ import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import {
   activateRateLimit,
   parseRateLimitHint,
-  waitForRateLimit,
 } from "@/shared/api/relayRateLimitGate";
 import {
   fetchChunkedHistory,
@@ -58,12 +57,12 @@ import {
   BACKOFF_RESET_STABLE_MS,
   EVENT_BATCH_MS,
   HISTORY_TIMEOUT_MS,
-  PUBLISH_TIMEOUT_MS,
   RECONNECT_BASE_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
   STALL_CHECK_INTERVAL_MS,
   STALL_IDLE_TIMEOUT_MS,
 } from "@/shared/api/relayClientTimings";
+import { createRelayPublisher } from "@/shared/api/relayPublishRetry";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
@@ -83,6 +82,13 @@ export class RelayClient {
   } | null = null;
   private subscriptions = new Map<string, RelaySubscription>();
   private pendingEvents = new Map<string, PendingEvent>();
+  private publisher = createRelayPublisher({
+    pendingEvents: this.pendingEvents,
+    sendEvent: (event) => this.sendRaw(["EVENT", event]),
+    ensureConnected: () => this.ensureConnected(),
+    recoverFromSocketFailure: (error, fallbackMessage) =>
+      this.recoverFromSocketFailure(error, fallbackMessage),
+  });
   private eventBuffer: Array<{ subId: string; event: RelayEvent }> = [];
   private flushTimeout: number | null = null;
   private reconnectListeners = new Set<() => void>();
@@ -696,47 +702,7 @@ export class RelayClient {
     timeoutMessage: string,
     sendErrorMessage: string,
   ) {
-    // Await the gate before sending EVENT; op timeout starts after the wait.
-    await waitForRateLimit();
-
-    return new Promise<RelayEvent>((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        this.pendingEvents.delete(event.id);
-        reject(new Error(timeoutMessage));
-      }, PUBLISH_TIMEOUT_MS);
-
-      this.pendingEvents.set(event.id, {
-        event,
-        resolve,
-        reject,
-        timeout,
-      });
-
-      void this.sendRaw(["EVENT", event]).catch(async (error) => {
-        const pendingEvent = this.pendingEvents.get(event.id);
-        this.pendingEvents.delete(event.id);
-        const normalizedError = this.recoverFromSocketFailure(
-          error,
-          sendErrorMessage,
-        );
-
-        try {
-          await this.ensureConnected();
-          if (!pendingEvent) {
-            throw normalizedError;
-          }
-
-          this.pendingEvents.set(event.id, pendingEvent);
-          await this.sendRaw(["EVENT", event]);
-        } catch (retryError) {
-          window.clearTimeout(timeout);
-          this.pendingEvents.delete(event.id);
-          reject(
-            this.recoverFromSocketFailure(retryError, normalizedError.message),
-          );
-        }
-      });
-    });
+    return this.publisher.publish(event, timeoutMessage, sendErrorMessage);
   }
 
   private async handleWsMessage(message: unknown, generation: number) {
@@ -823,6 +789,11 @@ export class RelayClient {
       // back off until the window expires.
       if (notice.startsWith("rate-limited:")) {
         activateRateLimit(parseRateLimitHint(notice));
+        // The dropped frame may have been a pending publish; re-send once the
+        // gate clears (see relayPublishRetry.ts).
+        this.publisher.retryAfterRateLimit(
+          () => generation === this.connectionGeneration,
+        );
       }
     }
   }

@@ -98,6 +98,45 @@ export function batchChannelIds(
   return batches;
 }
 
+/**
+ * Diff the active subscription batches against the current channel set.
+ *
+ * Active batches whose members are all still present are kept as-is; only
+ * batches that lost a member are disposed, and only uncovered IDs get new
+ * batches. Re-chunking the whole sorted list on every change would shift
+ * every batch boundary after a newly inserted ID — with hundreds of
+ * channels that disposes and re-REQs dozens of subscriptions at once,
+ * blowing the relay's per-pubkey WS admission budget and getting the very
+ * next EVENT publish silently dropped (the "new tab first send times out"
+ * bug). With this diff, adding one channel costs one REQ.
+ *
+ * Additions during a session can fragment coverage into small batches
+ * (one per add). That is deliberate: creates are rare and user-driven, and
+ * the next cold start re-chunks optimally — a consolidation pass here would
+ * reintroduce the REQ storm this exists to avoid.
+ */
+export function diffSubscriptionBatches(
+  activeBatchKeys: Iterable<string>,
+  channelIds: string[],
+  batchSize: number = LIVE_SUBSCRIPTION_BATCH_SIZE,
+): { staleBatchKeys: string[]; newBatches: string[][] } {
+  const idSet = new Set(channelIds);
+  const covered = new Set<string>();
+  const staleBatchKeys: string[] = [];
+  for (const batchKey of activeBatchKeys) {
+    const batchIds = batchKey.split(",");
+    if (batchIds.every((id) => idSet.has(id))) {
+      for (const id of batchIds) {
+        covered.add(id);
+      }
+    } else {
+      staleBatchKeys.push(batchKey);
+    }
+  }
+  const uncovered = channelIds.filter((id) => !covered.has(id));
+  return { staleBatchKeys, newBatches: batchChannelIds(uncovered, batchSize) };
+}
+
 // get_channels is an expensive O(channels) relay fan-out. Incoming traffic for
 // non-active channels arrives in bursts, so coalesce the refetch into a single
 // trailing invalidation instead of one per event.
@@ -459,15 +498,15 @@ export function useLiveChannelUpdates(
     const syncSubs = async (): Promise<boolean> => {
       const activeSubs = liveSubsRef.current;
       const channelIds = channelIdsKey ? channelIdsKey.split(",") : [];
-      const targetBatches = new Map(
-        batchChannelIds(channelIds).map((batch) => [batch.join(","), batch]),
+      const { staleBatchKeys, newBatches } = diffSubscriptionBatches(
+        activeSubs.keys(),
+        channelIds,
       );
 
-      for (const [batchKey, dispose] of activeSubs) {
-        if (!targetBatches.has(batchKey)) {
-          activeSubs.delete(batchKey);
-          void dispose().catch(() => {});
-        }
+      for (const batchKey of staleBatchKeys) {
+        const dispose = activeSubs.get(batchKey);
+        activeSubs.delete(batchKey);
+        if (dispose) void dispose().catch(() => {});
       }
 
       if (channelIds.length > 0) {
@@ -477,8 +516,8 @@ export function useLiveChannelUpdates(
       }
 
       let anyFailed = false;
-      const additions = Array.from(targetBatches.entries())
-        .filter(([batchKey]) => !activeSubs.has(batchKey))
+      const additions = newBatches
+        .map((batchIds) => [batchIds.join(","), batchIds] as const)
         .map(async ([batchKey, batchIds]) => {
           try {
             // Events are matched by the `#h` filter, so each one carries an
@@ -568,15 +607,15 @@ export function useLiveChannelUpdates(
       mentionSubsPubkeyRef.current = normalizedCurrentPubkey;
 
       const channelIds = channelIdsKey ? channelIdsKey.split(",") : [];
-      const targetBatches = new Map(
-        batchChannelIds(channelIds).map((batch) => [batch.join(","), batch]),
+      const { staleBatchKeys, newBatches } = diffSubscriptionBatches(
+        activeSubs.keys(),
+        channelIds,
       );
 
-      for (const [batchKey, dispose] of activeSubs) {
-        if (!targetBatches.has(batchKey)) {
-          activeSubs.delete(batchKey);
-          void dispose().catch(() => {});
-        }
+      for (const batchKey of staleBatchKeys) {
+        const dispose = activeSubs.get(batchKey);
+        activeSubs.delete(batchKey);
+        if (dispose) void dispose().catch(() => {});
       }
 
       let anyFailed = false;
@@ -585,8 +624,8 @@ export function useLiveChannelUpdates(
       // across effect runs (that's the point of the diff manager), so a
       // stale isCancelled flag from a prior run would silently drop events
       // on long-lived subs.
-      const additions = Array.from(targetBatches.entries())
-        .filter(([batchKey]) => !activeSubs.has(batchKey))
+      const additions = newBatches
+        .map((batchIds) => [batchIds.join(","), batchIds] as const)
         .map(async ([batchKey, batchIds]) => {
           try {
             const dispose = await relayClient.subscribeToChannelMentionEvents(

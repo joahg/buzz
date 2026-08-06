@@ -22,6 +22,7 @@ import {
 import {
   advanceChannelLastMessageAt,
   batchChannelIds,
+  diffSubscriptionBatches,
   isChannelUnreadTriggerKind,
   LIVE_SUBSCRIPTION_BATCH_SIZE,
   resolveChannelIdByEventReference,
@@ -142,6 +143,80 @@ test("batchChannelIds chunks a channel list into stable batches", () => {
   assert.equal(batches.length, 2);
   assert.equal(batches[0].length, LIVE_SUBSCRIPTION_BATCH_SIZE);
   assert.deepEqual(batches[1], [many[many.length - 1]]);
+});
+
+test("diffSubscriptionBatches: unchanged channel set keeps every batch", () => {
+  const ids = ["a", "b", "c", "d"];
+  const active = batchChannelIds(ids, 3).map((batch) => batch.join(","));
+
+  const { staleBatchKeys, newBatches } = diffSubscriptionBatches(
+    active,
+    ids,
+    3,
+  );
+  assert.deepEqual(staleBatchKeys, []);
+  assert.deepEqual(newBatches, []);
+});
+
+test("diffSubscriptionBatches: a new channel adds one batch without disposing existing ones", () => {
+  // "b2" sorts into the middle of the list; a full re-chunk would shift the
+  // second batch's boundary and churn it. The diff must not.
+  const active = ["a,b,c", "d,e"];
+  const ids = ["a", "b", "b2", "c", "d", "e"];
+
+  const { staleBatchKeys, newBatches } = diffSubscriptionBatches(
+    active,
+    ids,
+    3,
+  );
+  assert.deepEqual(staleBatchKeys, []);
+  assert.deepEqual(newBatches, [["b2"]]);
+});
+
+test("diffSubscriptionBatches: many new channels chunk into batch-sized groups", () => {
+  const active = ["a,b"];
+  const ids = ["a", "b", "n1", "n2", "n3", "n4"];
+
+  const { staleBatchKeys, newBatches } = diffSubscriptionBatches(
+    active,
+    ids,
+    3,
+  );
+  assert.deepEqual(staleBatchKeys, []);
+  assert.deepEqual(newBatches, [["n1", "n2", "n3"], ["n4"]]);
+});
+
+test("diffSubscriptionBatches: a removed channel disposes only its batch and re-covers survivors", () => {
+  const active = ["a,b,c", "d,e,f"];
+  const ids = ["a", "b", "c", "d", "f"];
+
+  const { staleBatchKeys, newBatches } = diffSubscriptionBatches(
+    active,
+    ids,
+    3,
+  );
+  assert.deepEqual(staleBatchKeys, ["d,e,f"]);
+  assert.deepEqual(newBatches, [["d", "f"]]);
+});
+
+test("diffSubscriptionBatches: empty channel set disposes everything", () => {
+  const { staleBatchKeys, newBatches } = diffSubscriptionBatches(
+    ["a,b", "c"],
+    [],
+    3,
+  );
+  assert.deepEqual(staleBatchKeys, ["a,b", "c"]);
+  assert.deepEqual(newBatches, []);
+});
+
+test("diffSubscriptionBatches: cold start chunks the full list", () => {
+  const { staleBatchKeys, newBatches } = diffSubscriptionBatches(
+    [],
+    ["a", "b", "c", "d"],
+    3,
+  );
+  assert.deepEqual(staleBatchKeys, []);
+  assert.deepEqual(newBatches, [["a", "b", "c"], ["d"]]);
 });
 
 test("notification event guard suppresses reconnect replay and stays bounded", () => {

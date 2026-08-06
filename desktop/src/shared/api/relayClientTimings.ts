@@ -11,6 +11,14 @@ export const HISTORY_TIMEOUT_MS = 25_000;
 export const PUBLISH_TIMEOUT_MS = 25_000;
 
 /**
+ * Re-sends of a pending publish after `rate-limited:` NOTICEs. The relay
+ * drops rate-limited EVENT frames without an OK, so pending publishes are
+ * re-sent (duplicate-safe) once the gate clears; the cap keeps a saturated
+ * connection failing instead of looping.
+ */
+export const MAX_PUBLISH_RATE_LIMIT_RETRIES = 3;
+
+/**
  * A stability-gated reset prevents reconnect flapping from erasing backoff.
  */
 export const BACKOFF_RESET_STABLE_MS = 60_000;

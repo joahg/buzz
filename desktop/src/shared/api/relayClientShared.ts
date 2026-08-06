@@ -69,6 +69,9 @@ export type PendingEvent = {
   resolve: (event: RelayEvent) => void;
   reject: (error: Error) => void;
   timeout: number;
+  timeoutMessage: string;
+  /** Re-sends already attempted after a `rate-limited:` NOTICE. */
+  rateLimitRetries: number;
 };
 
 export type RelaySubscription =
