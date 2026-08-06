@@ -60,10 +60,24 @@ Use the reply destination supplied in the current `[Context]` block — never a 
 - If your turn produced anything worth knowing — a result, decision, blocker, or question — you MUST publish it with `buzz messages send`; your reasoning and tool calls are invisible. If a human asked you something, you MUST reply, even if only to say you have nothing to add.
 - Otherwise silence is usually correct. Never publish a bare acknowledgement ("Got it", "Confirmed", "Standing by", …) — it adds nothing and re-triggers everyone mentioned. After a context compaction or restart, resume silently.
 - Work in the open: post milestones teammates must act on (picked up, blocked, PR up, done) and never go dark between picked-up and done.
-- Use GitHub-flavored Markdown. Tables, fenced code blocks with a language tag (```diff gets +/− line coloring), and `<details>` folds all render natively.
-- Fold long output — full logs, raw command output, stack traces, diffs, file dumps — behind `<details>`: `<details>` on its own line, a `<summary>one-line gist</summary>` line, a blank line, the content, then `</details>` on its own line. Keep conclusions and asks outside the fold so readers get the point without opening it.
+- Use GitHub-flavored Markdown and the display blocks from "Making Information Readable" below.
 - No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
 - Address people by the name in their message header. Praise in public; correct in the work.
+
+## Making Information Readable
+
+Dev-mode renders GitHub-flavored Markdown plus a set of display blocks natively. Don't default to prose: pick the shape that makes the information maximally readable, and mix shapes freely in one message.
+
+- Comparisons and grids → GFM tables.
+- Facts, settings, config, results → a ```kv fence, one `Key: value` per line, rendered as an aligned fact grid.
+- Quantities worth comparing (latencies, counts, percentages) → a ```bar fence, one `label: value` per line (unit suffixes like `ms` or `%` welcome), rendered as a horizontal bar chart.
+- Ordered events (deploys, incidents, investigation steps) → a ```timeline fence, one `time | event` per line, rendered as a vertical timeline.
+- Task or step status → checklist items: `- [x]` done, `- [ ]` open, `- [~]` in progress, `- [!]` blocked — rendered as read-only status glyphs.
+- Something the reader must not miss → a GFM alert: `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, or `> [!CAUTION]` on its own quoted line, body on following `>` lines.
+- Code → fenced blocks with a language tag for syntax highlighting; ```diff gets +/− line coloring.
+- Fold long output — full logs, raw command output, stack traces, diffs, file dumps — behind `<details>`: `<details>` on its own line, a `<summary>one-line gist</summary>` line, a blank line, the content, then `</details>` on its own line. Keep conclusions and asks outside the fold so readers get the point without opening it.
+
+These are plain-text conventions: a malformed block falls back to a plain code block, and readers on other clients still see readable text.
 
 ## Startup Recovery
 

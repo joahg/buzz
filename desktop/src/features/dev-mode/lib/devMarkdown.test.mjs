@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { DevCodeBlock, diffLineClass } from "./devCodeBlock.tsx";
+import {
+  DevAlertBlock,
+  DevBarBlock,
+  DevKvBlock,
+  DevTimelineBlock,
+} from "./devDataBlocks.tsx";
 import { renderDevMarkdown } from "./devMarkdown.tsx";
 
 function elements(nodes, type) {
@@ -275,4 +281,135 @@ test("indentedFenceAfterListItem_staysACodeBlock", () => {
   const nodes = renderDevMarkdown("- item\n  ```\n  code\n  ```");
   assert.equal(textOf(nodes[0].props.children[1]), "item");
   assert.equal(elements(nodes, DevCodeBlock).length, 1);
+});
+
+test("gfmAlert_rendersColoredCalloutWithBody", () => {
+  const nodes = renderDevMarkdown("> [!WARNING]\n> Do not deploy");
+  const [alert] = elements(nodes, DevAlertBlock);
+  assert.ok(alert);
+  assert.equal(alert.props.type, "warning");
+  assert.equal(textOf(alert.props.children), "Do not deploy");
+  assert.equal(elements(nodes, "blockquote").length, 0);
+});
+
+test("gfmAlert_markerIsCaseInsensitive", () => {
+  const nodes = renderDevMarkdown("> [!note]\n> heads up");
+  const [alert] = elements(nodes, DevAlertBlock);
+  assert.equal(alert.props.type, "note");
+});
+
+test("gfmAlert_withoutBodyStaysBlockquote", () => {
+  const nodes = renderDevMarkdown("> [!NOTE]");
+  assert.equal(elements(nodes, DevAlertBlock).length, 0);
+  assert.equal(elements(nodes, "blockquote").length, 1);
+});
+
+test("gfmAlert_withOnlyBlankBodyLinesStaysBlockquote", () => {
+  const nodes = renderDevMarkdown("> [!NOTE]\n>\n> ");
+  assert.equal(elements(nodes, DevAlertBlock).length, 0);
+  assert.equal(elements(nodes, "blockquote").length, 1);
+});
+
+test("plainBlockquote_isUnchangedByAlertSupport", () => {
+  const nodes = renderDevMarkdown("> just a quote");
+  assert.equal(elements(nodes, "blockquote").length, 1);
+});
+
+test("taskItem_rendersStatusGlyphInsteadOfBullet", () => {
+  const nodes = renderDevMarkdown(
+    "- [x] shipped\n- [ ] open\n- [~] running\n- [!] blocked",
+  );
+  const markers = nodes.map((node) => textOf(node.props.children[0]));
+  assert.deepEqual(markers, ["✓", "○", "◐", "⊘"]);
+  assert.equal(textOf(nodes[0].props.children[1]), "shipped");
+});
+
+test("numberedTaskItem_keepsNumberAndPrependsGlyph", () => {
+  const nodes = renderDevMarkdown("1. [x] first step");
+  assert.equal(textOf(nodes[0].props.children[0]), "1.");
+  assert.ok(textOf(nodes[0].props.children[1]).startsWith("✓ "));
+});
+
+test("unknownTaskMarker_staysLiteralText", () => {
+  const nodes = renderDevMarkdown("- [?] odd");
+  assert.equal(textOf(nodes[0].props.children[0]), "•");
+  assert.equal(textOf(nodes[0].props.children[1]), "[?] odd");
+});
+
+test("kvFence_rendersFactGrid", () => {
+  const nodes = renderDevMarkdown("```kv\nStatus: green\nOwner: joah\n```");
+  const [kv] = elements(nodes, DevKvBlock);
+  assert.ok(kv);
+  assert.deepEqual(kv.props.rows, [
+    { key: "Status", value: "green" },
+    { key: "Owner", value: "joah" },
+  ]);
+  assert.equal(elements(nodes, DevCodeBlock).length, 0);
+});
+
+test("malformedKvFence_fallsBackToCodeBlock", () => {
+  const nodes = renderDevMarkdown("```kv\nnot a pair\n```");
+  const [block] = elements(nodes, DevCodeBlock);
+  assert.ok(block);
+  assert.equal(block.props.code, "not a pair");
+  assert.equal(block.props.language, "kv");
+});
+
+test("barFence_rendersBarChart_withChartAlias", () => {
+  for (const tag of ["bar", "chart"]) {
+    const nodes = renderDevMarkdown(
+      `\`\`\`${tag}\napi: 120ms\nweb: 80ms\n\`\`\``,
+    );
+    const [bar] = elements(nodes, DevBarBlock);
+    assert.ok(bar, tag);
+    assert.equal(bar.props.rows.length, 2);
+    assert.equal(bar.props.rows[0].value, 120);
+  }
+});
+
+test("malformedBarFence_fallsBackToCodeBlock", () => {
+  const nodes = renderDevMarkdown("```bar\napi: fast\n```");
+  assert.equal(elements(nodes, DevBarBlock).length, 0);
+  assert.equal(elements(nodes, DevCodeBlock).length, 1);
+});
+
+test("timelineFence_rendersTimeline", () => {
+  const nodes = renderDevMarkdown(
+    "```timeline\n14:02 | deploy started\n14:07 | canary green\n```",
+  );
+  const [timeline] = elements(nodes, DevTimelineBlock);
+  assert.ok(timeline);
+  assert.deepEqual(timeline.props.rows[1], {
+    time: "14:07",
+    text: "canary green",
+  });
+});
+
+test("malformedTimelineFence_fallsBackToCodeBlock", () => {
+  const nodes = renderDevMarkdown("```timeline\nno pipe\n```");
+  assert.equal(elements(nodes, DevTimelineBlock).length, 0);
+  assert.equal(elements(nodes, DevCodeBlock).length, 1);
+});
+
+function findDeep(node, type) {
+  if (node === null || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findDeep(child, type);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (node.type === type) return node;
+  return findDeep(node.props?.children, type);
+}
+
+test("dataBlocksInsideDetails_renderThroughRecursion", () => {
+  const nodes = renderDevMarkdown(
+    "<details>\n<summary>stats</summary>\n\n```kv\nRuns: 12\n```\n\n</details>",
+  );
+  const [details] = elements(nodes, "details");
+  const kv = findDeep(details, DevKvBlock);
+  assert.ok(kv);
+  assert.deepEqual(kv.props.rows, [{ key: "Runs", value: "12" }]);
 });

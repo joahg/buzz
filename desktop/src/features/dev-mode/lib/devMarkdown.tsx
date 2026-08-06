@@ -2,6 +2,19 @@ import type * as React from "react";
 
 import { DevCodeBlock } from "@/features/dev-mode/lib/devCodeBlock";
 import {
+  ALERT_MARKER_RE,
+  DevAlertBlock,
+  DevBarBlock,
+  DevKvBlock,
+  DevTimelineBlock,
+  TASK_MARKER_RE,
+  parseBarBlock,
+  parseKvBlock,
+  parseTimelineBlock,
+  taskGlyph,
+  type AlertType,
+} from "@/features/dev-mode/lib/devDataBlocks";
+import {
   renderHighlightedContent,
   type ChannelRefOptions,
   type MentionStyle,
@@ -13,10 +26,12 @@ import type { ImetaLookup } from "@/shared/ui/markdown/types";
 /**
  * Block-level markdown for developer-mode transcripts, layered over the
  * span-based inline highlighter: fenced code blocks, headings, bullet and
- * numbered lists, blockquotes, and horizontal rules. Everything renders as
- * React nodes — never HTML — and keeps the terminal aesthetic (monospace,
- * square corners). Anything unrecognized stays a pre-wrap paragraph, so
- * plain human chat renders exactly as typed.
+ * numbered lists (with read-only status glyphs), blockquotes, GFM alerts,
+ * horizontal rules, GFM tables, `<details>` folds, and data-presentation
+ * fences (```kv, ```bar, ```timeline — see devDataBlocks). Everything
+ * renders as React nodes — never HTML — and keeps the terminal aesthetic
+ * (monospace, square corners). Anything unrecognized stays a pre-wrap
+ * paragraph, so plain human chat renders exactly as typed.
  */
 
 const FENCE_RE = /^\s{0,3}```/;
@@ -77,6 +92,33 @@ const ALIGN_CLASS: Record<CellAlign, string> = {
 };
 
 /**
+ * A fenced block whose language tag is a data-presentation convention
+ * (```kv, ```bar / ```chart, ```timeline). Returns null when the tag is
+ * unknown or the content doesn't fully parse, so the caller falls back to a
+ * plain code block and malformed input stays readable.
+ */
+function dataBlockNode(
+  language: string,
+  code: string,
+  inline: (text: string) => React.ReactNode,
+  key: string,
+): React.ReactNode | null {
+  if (language === "kv") {
+    const rows = parseKvBlock(code);
+    return rows && <DevKvBlock key={key} inline={inline} rows={rows} />;
+  }
+  if (language === "bar" || language === "chart") {
+    const rows = parseBarBlock(code);
+    return rows && <DevBarBlock key={key} rows={rows} />;
+  }
+  if (language === "timeline") {
+    const rows = parseTimelineBlock(code);
+    return rows && <DevTimelineBlock key={key} inline={inline} rows={rows} />;
+  }
+  return null;
+}
+
+/**
  * One attached image or video in a dev-mode transcript, rendered through the
  * standard `Markdown` component so developer mode inherits the lightbox,
  * context menus, video controls, and relay URL handling.
@@ -121,6 +163,20 @@ export function renderDevMarkdown(
 
   const flushQuote = () => {
     if (quote.length === 0) return;
+    // A GFM alert: `> [!NOTE]` (or TIP/IMPORTANT/WARNING/CAUTION) on the
+    // first quoted line turns the blockquote into a colored callout.
+    const alertMarker = ALERT_MARKER_RE.exec(quote[0].trim());
+    if (alertMarker && quote.slice(1).some((line) => line.trim() !== "")) {
+      const type = alertMarker[1].toLowerCase() as AlertType;
+      const body = quote.slice(1).join("\n");
+      quote = [];
+      nodes.push(
+        <DevAlertBlock key={`a${nodes.length}`} type={type}>
+          {renderDevMarkdown(body, mentions, channelRefs, imetaByUrl)}
+        </DevAlertBlock>,
+      );
+      return;
+    }
     nodes.push(
       <blockquote
         key={`q${nodes.length}`}
@@ -147,12 +203,21 @@ export function renderDevMarkdown(
         i += 1;
       }
       i += 1; // Closing fence (or end of message on an unterminated fence).
+      const codeText = code.join("\n");
+      const dataBlock = dataBlockNode(
+        language,
+        codeText,
+        inline,
+        `c${nodes.length}`,
+      );
       nodes.push(
-        <DevCodeBlock
-          key={`c${nodes.length}`}
-          code={code.join("\n")}
-          language={language}
-        />,
+        dataBlock ?? (
+          <DevCodeBlock
+            key={`c${nodes.length}`}
+            code={codeText}
+            language={language}
+          />
+        ),
       );
       continue;
     }
@@ -335,7 +400,11 @@ export function renderDevMarkdown(
     if (item) {
       flushParagraph();
       const [, indent, bullet, number, rest] = item;
-      const body = [rest];
+      // `- [x] text` renders a read-only status glyph in place of the
+      // bullet (never a checkbox — agent messages must not look editable).
+      const task = TASK_MARKER_RE.exec(rest);
+      const status = task ? taskGlyph(task[1]) : null;
+      const body = [status && task ? task[2] : rest];
       i += 1;
       // Indented follow-up lines continue the item (GFM lazy continuation)
       // unless they start a block of their own — a nested item, fence,
@@ -359,10 +428,20 @@ export function renderDevMarkdown(
           className="flex"
           style={indent ? { paddingLeft: `${indent.length}ch` } : undefined}
         >
-          <span className="shrink-0 select-none pr-2 text-muted-foreground">
-            {bullet ? "•" : `${number}.`}
+          <span
+            className={cn(
+              "shrink-0 select-none pr-2",
+              status && bullet ? status.className : "text-muted-foreground",
+            )}
+          >
+            {bullet ? (status ? status.glyph : "•") : `${number}.`}
           </span>
           <span className="min-w-0 flex-1 whitespace-pre-wrap">
+            {status && !bullet ? (
+              <span className={cn("select-none", status.className)}>
+                {status.glyph}{" "}
+              </span>
+            ) : null}
             {inline(body.join("\n"))}
           </span>
         </div>,

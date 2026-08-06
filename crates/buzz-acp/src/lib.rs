@@ -3767,10 +3767,18 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
-    fn shared_base_prompt_teaches_native_formatting_and_details_folding() {
+    fn shared_base_prompt_teaches_display_toolkit_and_details_folding() {
         let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("## Making Information Readable"));
+        assert!(prompt.contains("maximally readable"));
+        assert!(prompt.contains("```kv fence, one `Key: value` per line"));
+        assert!(prompt.contains("```bar fence, one `label: value` per line"));
+        assert!(prompt.contains("```timeline fence, one `time | event` per line"));
+        assert!(prompt.contains("`- [x]` done, `- [ ]` open, `- [~]` in progress, `- [!]` blocked"));
+        assert!(prompt.contains(
+            "`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, or `> [!CAUTION]`"
+        ));
         assert!(prompt.contains("```diff gets +/− line coloring"));
-        assert!(prompt.contains("`<details>` folds all render natively"));
         assert!(prompt.contains("Fold long output"));
         assert!(prompt.contains("`<summary>one-line gist</summary>`"));
         assert!(prompt.contains("Keep conclusions and asks outside the fold"));
