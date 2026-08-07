@@ -155,3 +155,61 @@ test("display-toolkit blocks stay inside the transcript pane", async ({
   await expectNoHorizontalOverflow(page);
   await expectPaneContainsContent(page, "dev-mode-transcript");
 });
+
+// Multiple communities mount the 56px community rail beside the shell — a
+// case the specs above never hit (the harness seeds one community). The
+// sidebar wrapper's w-full used to floor its automatic flex minimum at the
+// window width, so the rail pushed the whole shell past the right edge.
+test("dev-mode content stays inside the window with the community rail", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await installMockBridge(page);
+  await page.addInitScript(() => {
+    const raw = window.localStorage.getItem("buzz-communities");
+    if (!raw) return;
+    const communities = JSON.parse(raw) as Array<Record<string, unknown>>;
+    if (communities.length !== 1) return;
+    communities.push({
+      ...communities[0],
+      id: "e2e-second-community",
+      name: "Second",
+    });
+    window.localStorage.setItem(
+      "buzz-communities",
+      JSON.stringify(communities),
+    );
+    localStorage.setItem("buzz.displayStyle", "developer");
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  const composer = page.getByTestId("dev-mode-composer");
+  await composer.waitFor();
+
+  await composer.focus();
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+  await page.getByTestId("dev-mode-transcript").waitFor();
+
+  await composer.fill(LONG_MESSAGE);
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByTestId("dev-mode-transcript").getByText("tail", { exact: false }),
+  ).toBeVisible();
+
+  await composer.fill(TOOLKIT_MESSAGE);
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByTestId("dev-mode-transcript").getByText("toolkit-tail"),
+  ).toBeVisible();
+
+  await expectNoHorizontalOverflow(page);
+  await expectPaneContainsContent(page, "dev-mode-transcript");
+
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+  await page.getByTestId("dev-mode-thread-panel").waitFor();
+
+  await expectNoHorizontalOverflow(page);
+  await expectPaneContainsContent(page, "dev-mode-transcript");
+});

@@ -763,8 +763,12 @@ export function AppShell() {
                 }
               />
             ) : null}
+            {/* min-w-0: the wrapper's w-full otherwise floors its automatic
+                flex minimum at the window width, so when the community rail
+                is present the whole shell overflows the right edge by the
+                rail's width. */}
             <SidebarProvider
-              className="relative z-10 min-h-0 flex-1 flex-col overflow-visible"
+              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible"
               data-testid="app-sidebar-layer"
             >
               <AppProfilePanelProvider>
