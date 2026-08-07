@@ -9,6 +9,37 @@ import { installMockBridge } from "../helpers/bridge";
 
 const LONG_MESSAGE = `check https://example.com/${"averylongpathsegment-".repeat(12)}end and ${"Supercalifragilistic".repeat(14)} tail`;
 
+// Display-toolkit blocks (kv/bar/timeline fences, checklist glyphs, alerts)
+// must be as overflow-safe as plain text. The fixed label/time/value columns
+// in bar and timeline blocks give rows a hard min-content width, so this
+// content must scroll inside its block on narrow panes — never widen the
+// transcript (the 0.6.5 regression: a bar chart in a narrow pane pushed
+// every message's wrap boundary past the pane edge).
+const TOOLKIT_MESSAGE = [
+  "```kv",
+  "Endpoint: https://example.com/media/4b34b261b02374e193d3fa9ff62889ac0022b6ab4039181008da056345c9b9af.png",
+  `Long: ${"unbrokenvalue".repeat(20)}`,
+  "```",
+  "",
+  "```bar",
+  "p50: 42ms",
+  `${"averylongbarlabel".repeat(8)}: 1,240ms`,
+  "cpu: 87%",
+  "```",
+  "",
+  "```timeline",
+  `2026-08-06T09:45:57-05:00 | ${"unbrokenevent".repeat(20)}`,
+  "t+5s | short",
+  "```",
+  "",
+  `- [ ] checklist item with a long unbroken word ${"Supercalifragilistic".repeat(14)}`,
+  "",
+  "> [!WARNING]",
+  `> alert body with a long unbroken word ${"Supercalifragilistic".repeat(14)}`,
+  "",
+  "toolkit-tail",
+].join("\n");
+
 async function expectNoHorizontalOverflow(
   page: import("@playwright/test").Page,
 ) {
@@ -26,6 +57,11 @@ async function expectNoHorizontalOverflow(
           `${el.tagName.toLowerCase()}[${el.dataset.testid ?? ""}] right=${Math.round(el.getBoundingClientRect().right)}`,
         );
       }
+      // Deliberate horizontal scroll containers (tables, <pre>, data blocks)
+      // clip their children; rects inside them may extend past the window
+      // without anything actually overflowing visually.
+      const overflowX = getComputedStyle(el).overflowX;
+      if (overflowX === "auto" || overflowX === "scroll") return;
       for (const child of el.children) walk(child as HTMLElement);
     };
     walk(shell);
@@ -74,6 +110,44 @@ test("dev-mode chat content stays inside its pane", async ({ page }) => {
   await expectPaneContainsContent(page, "dev-mode-transcript");
 
   // Side chat splits the screen; both panes must still contain their content.
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+  await page.getByTestId("dev-mode-thread-panel").waitFor();
+
+  await expectNoHorizontalOverflow(page);
+  await expectPaneContainsContent(page, "dev-mode-transcript");
+});
+
+// 700px is the reproducing width for the 0.6.5 regression: with the side
+// chat open the transcript pane drops to ~200px, narrower than a bar row's
+// fixed columns.
+test("display-toolkit blocks stay inside the transcript pane", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 700, height: 700 });
+  await installMockBridge(page);
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.displayStyle", "developer");
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  const composer = page.getByTestId("dev-mode-composer");
+  await composer.waitFor();
+
+  await composer.focus();
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+  await page.getByTestId("dev-mode-transcript").waitFor();
+
+  await composer.fill(TOOLKIT_MESSAGE);
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByTestId("dev-mode-transcript").getByText("toolkit-tail"),
+  ).toBeVisible();
+
+  await expectNoHorizontalOverflow(page);
+  await expectPaneContainsContent(page, "dev-mode-transcript");
+
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("Enter");
   await page.getByTestId("dev-mode-thread-panel").waitFor();

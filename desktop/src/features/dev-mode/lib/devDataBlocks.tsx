@@ -146,8 +146,11 @@ export function DevKvBlock({
   inline: InlineRenderer;
 }) {
   return (
+    // overflow-x-auto zeroes the block's min-content contribution (the same
+    // containment tables and <pre> use) so a long key or value can never push
+    // the transcript pane wider than its window.
     <div
-      className="my-1 grid w-fit max-w-full grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-0.5 border-l-2 border-border/50 pl-2"
+      className="my-1 grid w-fit max-w-full grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-0.5 overflow-x-auto border-l-2 border-border/50 pl-2"
       data-block-kv=""
     >
       {rows.map((row, i) => (
@@ -223,9 +226,12 @@ export function DevBarBlock({ rows }: { rows: BarRow[] }) {
     Math.max(...rows.map((row) => row.label.length)),
     24,
   );
-  const textCh = Math.max(...rows.map((row) => row.text.length));
+  const textCh = Math.min(Math.max(...rows.map((row) => row.text.length)), 24);
   return (
-    <div className="my-1 space-y-0.5" data-block-bar="">
+    // overflow-x-auto: the fixed label/value columns give each row a hard
+    // min-content width, which must scroll inside the block rather than push
+    // the transcript pane wider than its window.
+    <div className="my-1 space-y-0.5 overflow-x-auto" data-block-bar="">
       {rows.map((row, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional and never reordered
         <div key={i} className="flex items-center gap-2">
@@ -236,15 +242,16 @@ export function DevBarBlock({ rows }: { rows: BarRow[] }) {
           >
             {row.label}
           </span>
-          <div className="h-3.5 max-w-96 flex-1 border border-border/40 bg-muted/20">
+          <div className="h-3.5 min-w-12 max-w-96 flex-1 border border-border/40 bg-muted/20">
             <div
               className="h-full bg-sky-500/60"
               style={{ width: `${widths[i]}%` }}
             />
           </div>
           <span
-            className="shrink-0 text-right tabular-nums text-muted-foreground"
+            className="shrink-0 truncate text-right tabular-nums text-muted-foreground"
             style={{ width: `${textCh}ch` }}
+            title={row.text}
           >
             {row.text}
           </span>
@@ -282,7 +289,9 @@ export function DevTimelineBlock({
 }) {
   const timeCh = Math.min(Math.max(...rows.map((row) => row.time.length)), 24);
   return (
-    <div className="my-1" data-block-timeline="">
+    // overflow-x-auto: the fixed time column gives each row a hard
+    // min-content width — scroll it inside the block on narrow panes.
+    <div className="my-1 overflow-x-auto" data-block-timeline="">
       {rows.map((row, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional and never reordered
         <div key={i} className="relative flex gap-2 pb-0.5 pl-3">

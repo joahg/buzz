@@ -256,7 +256,10 @@ export function DevMessageRow({
       )}
       style={isHuman ? { borderLeftColor: authorColor } : undefined}
     >
-      <div className="flex min-w-0 items-baseline gap-2">
+      {/* flex-wrap: on very narrow panes (side-chat splits) the rigid
+          name+timestamp can fill the row; trailing items must wrap under
+          rather than poke past the pane edge. */}
+      <div className="flex min-w-0 flex-wrap items-baseline gap-2">
         <span
           className={cn(
             "shrink-0 font-medium",
